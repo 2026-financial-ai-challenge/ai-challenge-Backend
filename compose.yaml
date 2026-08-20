@@ -6,4 +6,22 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - db
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+  db:
+    image: postgres:16
+    container_name: safety-phishing-db
+    environment:
+      POSTGRES_DB: safety_phishing_call
+      POSTGRES_USER: safety_phishing_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

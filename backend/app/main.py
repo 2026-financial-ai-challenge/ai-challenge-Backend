@@ -29,7 +29,4 @@ app.include_router(consent.router)
 app.include_router(session.router)
 
 
-# 이후 DB연결 시 활성화
-# app.include_router(participant.session_router)
-# app.include_router(call.router)
-# app.include_router(report.router)
+# 이후 DB 연결 시 participant, call, report 라우터를 추가한다.

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import participant, consent, call, report
+from app.routers import consent, session
 
 
 # app = FastAPI(
@@ -25,8 +25,11 @@ def root():
     return {"message": "Phishing Call Backend API"}
 
 
-app.include_router(participant.router)
 app.include_router(consent.router)
-app.include_router(participant.session_router)
+app.include_router(session.router)
+
+
+# 이후 DB연결 시 활성화
+# app.include_router(participant.session_router)
 # app.include_router(call.router)
 # app.include_router(report.router)

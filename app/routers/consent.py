@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app.schemas.consent import SubmitConsentRequest, SubmitConsentResponse
-from app.services.participant_service import create_session
+from app.services.session_service import create_session
 
 
 router = APIRouter(prefix="/v1/consents", tags=["Consents"])

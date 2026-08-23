@@ -33,5 +33,9 @@ class SessionResponse(BaseModel):
     updatedAt: datetime
 
 
+class GetSessionResponse(BaseModel):
+    session: SessionResponse
+
+
 class RegisterPhoneResponse(BaseModel):
     session: SessionResponse

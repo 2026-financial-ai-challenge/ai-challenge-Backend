@@ -2,9 +2,9 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app.schemas.consent import (
+    GetSessionResponse,
     RegisterPhoneRequest,
     RegisterPhoneResponse,
-    SessionResponse,
 )
 from app.services.session_service import get_session, register_phone
 
@@ -12,7 +12,7 @@ from app.services.session_service import get_session, register_phone
 router = APIRouter(prefix="/v1/sessions", tags=["Sessions"])
 
 
-@router.get("/{session_id}", response_model=SessionResponse)
+@router.get("/{session_id}", response_model=GetSessionResponse)
 def get_session_by_id(session_id: str):
     session = get_session(session_id)
     if session is None:
@@ -24,7 +24,7 @@ def get_session_by_id(session_id: str):
             },
         )
 
-    return session
+    return GetSessionResponse(session=session)
 
 
 @router.post("/{session_id}/phone", response_model=RegisterPhoneResponse)

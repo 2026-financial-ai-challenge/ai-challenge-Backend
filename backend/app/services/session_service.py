@@ -32,6 +32,14 @@ def create_session(privacy: bool, unannounced_training: bool) -> SessionResponse
     return session
 
 
+def get_session(session_id: str) -> SessionResponse | None:
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            return None
+        return session.model_copy(deep=True)
+
+
 def register_phone(session_id: str, phone_number: str) -> SessionResponse | None:
     digits = re.sub(r"\D", "", phone_number)
     if not re.fullmatch(r"01[016789]\d{7,8}", digits):

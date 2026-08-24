@@ -1,1 +1,8 @@
-# 통화 요청·응답 스키마는 MVP 이후 구현한다.
+from typing import Literal
+
+from pydantic import BaseModel
+
+
+class StartCallResponse(BaseModel):
+    callId: str
+    status: Literal["calling"]

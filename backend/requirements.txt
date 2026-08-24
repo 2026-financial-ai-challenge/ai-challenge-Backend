@@ -3,6 +3,7 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.14.2
 click==8.4.2
+clawops[agent,openai]==0.46.1
 fastapi==0.141.1
 h11==0.16.0
 httptools==0.8.0
@@ -23,4 +24,4 @@ typing_extensions==4.16.0
 uvicorn==0.52.4
 uvloop==0.22.1
 watchfiles==1.2.0
-websockets==17.0.1
+websockets==15.0.1

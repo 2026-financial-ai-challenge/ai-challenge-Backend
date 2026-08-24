@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import consent, session
+from app.routers import call, consent, session, webhook
 
 
 # app = FastAPI(
@@ -27,6 +27,8 @@ def root():
 
 app.include_router(consent.router)
 app.include_router(session.router)
+app.include_router(call.router)
+app.include_router(webhook.router)
 
 
 # 이후 DB 연결 시 participant, call, report 라우터를 추가한다.

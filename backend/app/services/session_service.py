@@ -1,12 +1,14 @@
 import re
 from datetime import datetime, timezone
 from threading import Lock
+from typing import Literal
 from uuid import uuid4
 
 from app.schemas.consent import ConsentRecord, SessionResponse
 
 
 _sessions: dict[str, SessionResponse] = {}
+_phone_numbers: dict[str, str] = {}
 _sessions_lock = Lock()
 
 
@@ -52,6 +54,26 @@ def register_phone(session_id: str, phone_number: str) -> SessionResponse | None
 
         session.phoneNumberMasked = _mask_phone_number(digits)
         session.callStatus = "waiting"
+        session.updatedAt = datetime.now(timezone.utc)
+        _phone_numbers[session_id] = digits
+        return session.model_copy(deep=True)
+
+
+def get_phone_number(session_id: str) -> str | None:
+    with _sessions_lock:
+        return _phone_numbers.get(session_id)
+
+
+def update_call_status(
+    session_id: str,
+    call_status: Literal["waiting", "calling", "completed"],
+) -> SessionResponse | None:
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            return None
+
+        session.callStatus = call_status
         session.updatedAt = datetime.now(timezone.utc)
         return session.model_copy(deep=True)
 

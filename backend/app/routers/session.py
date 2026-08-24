@@ -39,7 +39,9 @@ def get_session_by_id(session_id: str):
 
 
 @router.post("/{session_id}/phone/otp", response_model=RequestOtpResponse)
-def request_session_phone_otp(session_id: str, body: RequestOtpRequest, request: Request):
+def request_session_phone_otp(
+    session_id: str, body: RequestOtpRequest, request: Request
+):
     return request_otp(session_id, body.phoneNumber, client_ip(request))
 
 

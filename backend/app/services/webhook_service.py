@@ -2,11 +2,11 @@ import base64
 import hashlib
 import hmac
 import os
-from threading import Lock
 
+from sqlalchemy import select
 
-_transcript_events: dict[tuple[str, str], dict[str, str]] = {}
-_transcript_events_lock = Lock()
+from app.database import SessionLocal
+from app.models.transcript_event import TranscriptEvent
 
 
 def verify_clawops_signature(
@@ -35,6 +35,20 @@ def verify_clawops_signature(
 
 
 def save_transcript_event(params: dict[str, str]) -> None:
-    key = (params["CallId"], params["Event"])
-    with _transcript_events_lock:
-        _transcript_events[key] = params.copy()
+    with SessionLocal.begin() as db:
+        event = db.scalar(
+            select(TranscriptEvent).where(
+                TranscriptEvent.clawops_call_id == params["CallId"],
+                TranscriptEvent.event_type == params["Event"],
+            )
+        )
+        if event is None:
+            db.add(
+                TranscriptEvent(
+                    clawops_call_id=params["CallId"],
+                    event_type=params["Event"],
+                    payload=params.copy(),
+                )
+            )
+        else:
+            event.payload = params.copy()

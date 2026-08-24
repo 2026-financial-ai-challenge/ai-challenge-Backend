@@ -1,8 +1,13 @@
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from threading import Thread
 
+from sqlalchemy import select
+
+from app.database import SessionLocal
+from app.models.call import Call
 from app.services.session_service import (
     get_phone_number,
     get_session,
@@ -82,6 +87,7 @@ async def _create_outbound_call(session_id: str):
         raise
 
     update_call_status(session_id, "calling")
+    _save_call(session_id, call_session.call_id)
     return agent, call_session
 
 
@@ -89,8 +95,10 @@ async def _monitor_call(session_id: str, agent, call_session) -> None:
     try:
         await call_session.wait()
         update_call_status(session_id, "completed")
+        _complete_call(call_session.call_id)
     except Exception:
         update_call_status(session_id, "waiting")
+        _fail_call(call_session.call_id, "ClawOps call failed")
         logger.exception("ClawOps call failed: session_id=%s", session_id)
     finally:
         await agent.disconnect()
@@ -121,3 +129,35 @@ def _run_training_call(session_id: str) -> None:
 async def _start_and_monitor_call(session_id: str) -> None:
     agent, call_session = await _create_outbound_call(session_id)
     await _monitor_call(session_id, agent, call_session)
+
+
+def _save_call(session_id: str, clawops_call_id: str) -> None:
+    with SessionLocal.begin() as db:
+        db.add(
+            Call(
+                session_id=session_id,
+                clawops_call_id=clawops_call_id,
+                status="calling",
+            )
+        )
+
+
+def _complete_call(clawops_call_id: str) -> None:
+    with SessionLocal.begin() as db:
+        call = db.scalar(
+            select(Call).where(Call.clawops_call_id == clawops_call_id)
+        )
+        if call is not None:
+            call.status = "completed"
+            call.completed_at = datetime.now(timezone.utc)
+
+
+def _fail_call(clawops_call_id: str, reason: str) -> None:
+    with SessionLocal.begin() as db:
+        call = db.scalar(
+            select(Call).where(Call.clawops_call_id == clawops_call_id)
+        )
+        if call is not None:
+            call.status = "failed"
+            call.failure_reason = reason
+            call.completed_at = datetime.now(timezone.utc)

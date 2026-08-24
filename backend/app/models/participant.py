@@ -1,9 +1,27 @@
+from datetime import datetime, timezone
 
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import DateTime, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.database import Base
 
-class Participant(Base):
-    __tablename__ = 'participants'
 
-    id = Column(Integer, primary_key=True, index=True)
-    phone_number = Column(String, nullable=False, unique=True)
+class Participant(Base):
+    __tablename__ = "participants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    phone_number: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    phone_number_masked: Mapped[str] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    sessions: Mapped[list["TrainingSession"]] = relationship(
+        back_populates="participant"
+    )
+    consents: Mapped[list["Consent"]] = relationship(back_populates="participant")

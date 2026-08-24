@@ -19,8 +19,21 @@ class ConsentRecord(BaseModel):
     consentedAt: datetime
 
 
-class RegisterPhoneRequest(BaseModel):
+class RequestOtpRequest(BaseModel):
     phoneNumber: str
+
+
+class RequestOtpResponse(BaseModel):
+    phoneNumberMasked: str
+    code: str
+    sendToNumber: str
+    expiresInSec: int
+    resendAvailableInSec: int
+
+
+class VerifyOtpRequest(BaseModel):
+    phoneNumber: str
+    code: str
 
 
 class SessionResponse(BaseModel):
@@ -34,8 +47,4 @@ class SessionResponse(BaseModel):
 
 
 class GetSessionResponse(BaseModel):
-    session: SessionResponse
-
-
-class RegisterPhoneResponse(BaseModel):
     session: SessionResponse

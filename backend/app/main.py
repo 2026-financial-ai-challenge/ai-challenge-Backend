@@ -1,24 +1,46 @@
-from fastapi import FastAPI
+import logging
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.errors import ApiError
 from app.routers import consent, session
 
-
-# app = FastAPI(
-#     title='Phishig Call API',
-#     description='AI 모의 보이스피싱 훈련 서비스 API',
-#     version='1.0.0'
-# )
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
+logging.getLogger(__name__).info(
+    "Phone verify: Octomo (%s)",
+    "configured" if os.getenv("OCTOMO_API_KEY") else "API key missing",
+)
 
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(ApiError)
+def handle_api_error(_request: Request, exc: ApiError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"message": exc.message, "code": exc.code},
+    )
+
 
 @app.get("/")
 def root():
@@ -27,6 +49,3 @@ def root():
 
 app.include_router(consent.router)
 app.include_router(session.router)
-
-
-# 이후 DB 연결 시 participant, call, report 라우터를 추가한다.

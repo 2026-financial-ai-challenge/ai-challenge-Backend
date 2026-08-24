@@ -1,15 +1,26 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.schemas.consent import (
     GetSessionResponse,
-    RegisterPhoneRequest,
-    RegisterPhoneResponse,
+    RequestOtpRequest,
+    RequestOtpResponse,
+    VerifyOtpRequest,
 )
-from app.services.session_service import get_session, register_phone
+from app.services.otp_service import request_otp, verify_otp
+from app.services.session_service import get_session
 
 
 router = APIRouter(prefix="/v1/sessions", tags=["Sessions"])
+
+
+def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client is None:
+        return "unknown"
+    return request.client.host
 
 
 @router.get("/{session_id}", response_model=GetSessionResponse)
@@ -27,26 +38,12 @@ def get_session_by_id(session_id: str):
     return GetSessionResponse(session=session)
 
 
-@router.post("/{session_id}/phone", response_model=RegisterPhoneResponse)
-def register_session_phone(session_id: str, body: RegisterPhoneRequest):
-    try:
-        session = register_phone(session_id, body.phoneNumber)
-    except ValueError:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "message": "올바른 휴대전화번호 형식이 아닙니다.",
-                "code": "INVALID_PHONE",
-            },
-        )
+@router.post("/{session_id}/phone/otp", response_model=RequestOtpResponse)
+def request_session_phone_otp(session_id: str, body: RequestOtpRequest, request: Request):
+    return request_otp(session_id, body.phoneNumber, client_ip(request))
 
-    if session is None:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "message": "세션을 찾을 수 없습니다.",
-                "code": "SESSION_NOT_FOUND",
-            },
-        )
 
-    return RegisterPhoneResponse(session=session)
+@router.post("/{session_id}/phone/verify", response_model=GetSessionResponse)
+def verify_session_phone_otp(session_id: str, body: VerifyOtpRequest, request: Request):
+    session = verify_otp(session_id, body.phoneNumber, body.code, client_ip(request))
+    return GetSessionResponse(session=session)

@@ -9,8 +9,8 @@ SCENARIO = Scenario(
     name="대출권유형",
     max_turns=5,
     tts_voice_id=THEO,
-    tts_stability=0.73,
-    tts_similarity_boost=0.7,
+    tts_stability=0.42,
+    tts_similarity_boost=0.75,
     opening_line=(
         "안녕하세요. "
         "가계금리전환상담소 박민수입니다. "

@@ -8,13 +8,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.errors import ApiError
-from app.routers import call, consent, session, webhook
+from app.routers import call, consent, report, session, webhook
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+_REPO_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(_BACKEND_DIR / ".env", override=True)
+load_dotenv(_REPO_DIR / "ai" / ".env", override=False)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
+logging.getLogger("clawops.agent").setLevel(logging.INFO)
 logging.getLogger(__name__).info(
-    "Phone verify: Octomo (%s)",
+    "Phone verify: Octomo (%s) · call AI: PipelineSession (%s)",
     "configured" if os.getenv("OCTOMO_API_KEY") else "API key missing",
+    os.getenv("CALL_SCENARIO", "institution_impersonation"),
 )
 
 
@@ -50,4 +55,5 @@ def root():
 app.include_router(consent.router)
 app.include_router(session.router)
 app.include_router(call.router)
+app.include_router(report.router)
 app.include_router(webhook.router)

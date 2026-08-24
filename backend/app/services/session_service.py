@@ -8,7 +8,6 @@ from app.schemas.consent import ConsentRecord, SessionResponse
 
 _sessions: dict[str, SessionResponse] = {}
 _confirmed_phones: dict[str, str] = {}
-_phone_numbers: dict[str, str] = {}
 _sessions_lock = Lock()
 
 
@@ -56,13 +55,13 @@ def confirm_verified_phone(session_id: str, phone_number: str) -> SessionRespons
         session.phoneNumberMasked = mask_phone_number(phone_number)
         session.callStatus = "waiting"
         session.updatedAt = datetime.now(timezone.utc)
-        _phone_numbers[session_id] = digits
+        _confirmed_phones[session_id] = phone_number
         return session.model_copy(deep=True)
 
 
 def get_phone_number(session_id: str) -> str | None:
     with _sessions_lock:
-        return _phone_numbers.get(session_id)
+        return _confirmed_phones.get(session_id)
 
 
 def update_call_status(

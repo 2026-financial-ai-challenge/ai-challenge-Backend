@@ -1,10 +1,12 @@
 import asyncio
 import logging
 import os
+from threading import Thread
 
 from app.services.session_service import (
     get_phone_number,
     get_session,
+    mask_phone_number,
     update_call_status,
 )
 
@@ -36,6 +38,12 @@ def _require_env(name: str) -> str:
 
 
 async def start_outbound_call(session_id: str) -> str:
+    agent, call_session = await _create_outbound_call(session_id)
+    asyncio.create_task(_monitor_call(session_id, agent, call_session))
+    return call_session.call_id
+
+
+async def _create_outbound_call(session_id: str):
     if get_session(session_id) is None:
         raise SessionNotFoundError
 
@@ -74,8 +82,7 @@ async def start_outbound_call(session_id: str) -> str:
         raise
 
     update_call_status(session_id, "calling")
-    asyncio.create_task(_monitor_call(session_id, agent, call_session))
-    return call_session.call_id
+    return agent, call_session
 
 
 async def _monitor_call(session_id: str, agent, call_session) -> None:
@@ -87,12 +94,6 @@ async def _monitor_call(session_id: str, agent, call_session) -> None:
         logger.exception("ClawOps call failed: session_id=%s", session_id)
     finally:
         await agent.disconnect()
-import logging
-
-from app.services.session_service import mask_phone_number
-
-
-logger = logging.getLogger(__name__)
 
 
 def start_training_calls(session_id: str, phone_number: str) -> None:
@@ -102,3 +103,21 @@ def start_training_calls(session_id: str, phone_number: str) -> None:
         session_id,
         mask_phone_number(phone_number),
     )
+    Thread(
+        target=_run_training_call,
+        args=(session_id,),
+        daemon=True,
+    ).start()
+
+
+def _run_training_call(session_id: str) -> None:
+    try:
+        asyncio.run(_start_and_monitor_call(session_id))
+    except Exception:
+        update_call_status(session_id, "waiting")
+        logger.exception("Failed to start ClawOps call: session_id=%s", session_id)
+
+
+async def _start_and_monitor_call(session_id: str) -> None:
+    agent, call_session = await _create_outbound_call(session_id)
+    await _monitor_call(session_id, agent, call_session)

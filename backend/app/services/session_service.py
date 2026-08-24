@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from threading import Lock
+from typing import Literal
 from uuid import uuid4
 
 from app.schemas.consent import ConsentRecord, SessionResponse
@@ -55,6 +56,25 @@ def confirm_verified_phone(session_id: str, phone_number: str) -> SessionRespons
         session.callStatus = "waiting"
         session.updatedAt = datetime.now(timezone.utc)
         _confirmed_phones[session_id] = phone_number
+        return session.model_copy(deep=True)
+
+
+def get_phone_number(session_id: str) -> str | None:
+    with _sessions_lock:
+        return _confirmed_phones.get(session_id)
+
+
+def update_call_status(
+    session_id: str,
+    call_status: Literal["waiting", "calling", "completed"],
+) -> SessionResponse | None:
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            return None
+
+        session.callStatus = call_status
+        session.updatedAt = datetime.now(timezone.utc)
         return session.model_copy(deep=True)
 
 

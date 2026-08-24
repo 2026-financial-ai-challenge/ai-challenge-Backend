@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.errors import ApiError
-from app.routers import consent, session
+from app.routers import call, consent, session, webhook
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
@@ -49,3 +49,5 @@ def root():
 
 app.include_router(consent.router)
 app.include_router(session.router)
+app.include_router(call.router)
+app.include_router(webhook.router)

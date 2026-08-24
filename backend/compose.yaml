@@ -8,6 +8,8 @@ services:
       - .:/app
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql://safety_phishing_user:${DB_PASSWORD}@db:5432/safety_phishing_call
     depends_on:
       - db
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

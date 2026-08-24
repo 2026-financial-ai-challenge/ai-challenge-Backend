@@ -98,6 +98,55 @@ def update_call_status(
         return _to_response(session)
 
 
+def attach_call(session_id: str, call_id: str) -> SessionResponse | None:
+    with SessionLocal.begin() as db:
+        session = db.scalar(_session_query(session_id))
+        if session is None:
+            return None
+
+        call = db.scalar(select(Call).where(Call.clawops_call_id == call_id))
+        if call is None:
+            db.add(Call(session_id=session_id, clawops_call_id=call_id, status="calling"))
+        else:
+            call.session_id = session_id
+            call.status = "calling"
+        session.call_status = "calling"
+        if session.report_status is None:
+            session.report_status = "pending"
+        session.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        return _to_response(session)
+
+
+def set_session_call_id(session_id: str, call_id: str) -> SessionResponse | None:
+    with SessionLocal.begin() as db:
+        session = db.scalar(_session_query(session_id))
+        if session is None:
+            return None
+
+        call = db.scalar(select(Call).where(Call.clawops_call_id == call_id))
+        if call is None:
+            db.add(Call(session_id=session_id, clawops_call_id=call_id, status="calling"))
+        session.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        return _to_response(session)
+
+
+def update_report_status(
+    session_id: str,
+    report_status: Literal["none", "pending", "draft", "final", "failed"],
+) -> SessionResponse | None:
+    with SessionLocal.begin() as db:
+        session = db.scalar(_session_query(session_id))
+        if session is None:
+            return None
+
+        session.report_status = report_status
+        session.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        return _to_response(session)
+
+
 def mask_phone_number(phone_number: str) -> str:
     if len(phone_number) == 11:
         return f"{phone_number[:3]}-****-{phone_number[7:]}"
@@ -111,6 +160,9 @@ def reset_sessions() -> None:
         db.execute(delete(Consent))
         db.execute(delete(TrainingSession))
         db.execute(delete(Participant))
+    from app.services.report_service import reset_reports
+
+    reset_reports()
 
 
 def _session_query(session_id: str):
@@ -119,6 +171,7 @@ def _session_query(session_id: str):
         .options(
             selectinload(TrainingSession.consent),
             selectinload(TrainingSession.participant),
+            selectinload(TrainingSession.calls),
         )
         .where(TrainingSession.id == session_id)
     )
@@ -126,6 +179,7 @@ def _session_query(session_id: str):
 
 def _to_response(session: TrainingSession) -> SessionResponse:
     consent = session.consent
+    latest_call = max(session.calls, key=lambda call: call.created_at, default=None)
     return SessionResponse(
         id=session.id,
         phoneNumberMasked=(
@@ -134,6 +188,8 @@ def _to_response(session: TrainingSession) -> SessionResponse:
             else None
         ),
         callStatus=session.call_status,
+        callId=latest_call.clawops_call_id if latest_call is not None else None,
+        reportStatus=session.report_status,
         currentTrainingType=session.current_training_type,
         consents=ConsentRecord(
             privacy=consent.privacy_agreed,

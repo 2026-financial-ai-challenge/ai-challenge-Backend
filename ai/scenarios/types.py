@@ -11,5 +11,5 @@ class Scenario:
     system_prompt: str
     max_turns: int
     tts_voice_id: str | None = None
-    tts_stability: float = 0.74
-    tts_similarity_boost: float = 0.72
+    tts_stability: float = 0.4
+    tts_similarity_boost: float = 0.75

@@ -9,8 +9,8 @@ SCENARIO = Scenario(
     name="카드결제형",
     max_turns=6,
     tts_voice_id=THEO,
-    tts_stability=0.72,
-    tts_similarity_boost=0.72,
+    tts_stability=0.4,
+    tts_similarity_boost=0.75,
     opening_line=(
         "안녕하세요. "
         "통합결제안전센터 이준호입니다. "

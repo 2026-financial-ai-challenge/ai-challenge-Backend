@@ -17,6 +17,8 @@ def create_session(privacy: bool, unannounced_training: bool) -> SessionResponse
         id=f"ses_{uuid4().hex}",
         phoneNumberMasked=None,
         callStatus=None,
+        callId=None,
+        reportStatus=None,
         currentTrainingType="announced",
         consents=ConsentRecord(
             privacy=privacy,
@@ -78,6 +80,45 @@ def update_call_status(
         return session.model_copy(deep=True)
 
 
+def attach_call(session_id: str, call_id: str) -> SessionResponse | None:
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            return None
+
+        session.callId = call_id
+        session.callStatus = "calling"
+        if session.reportStatus is None:
+            session.reportStatus = "pending"
+        session.updatedAt = datetime.now(timezone.utc)
+        return session.model_copy(deep=True)
+
+
+def set_session_call_id(session_id: str, call_id: str) -> SessionResponse | None:
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            return None
+
+        session.callId = call_id
+        session.updatedAt = datetime.now(timezone.utc)
+        return session.model_copy(deep=True)
+
+
+def update_report_status(
+    session_id: str,
+    report_status: Literal["none", "pending", "draft", "final", "failed"],
+) -> SessionResponse | None:
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            return None
+
+        session.reportStatus = report_status
+        session.updatedAt = datetime.now(timezone.utc)
+        return session.model_copy(deep=True)
+
+
 def mask_phone_number(phone_number: str) -> str:
     if len(phone_number) == 11:
         return f"{phone_number[:3]}-****-{phone_number[7:]}"
@@ -88,3 +129,6 @@ def reset_sessions() -> None:
     with _sessions_lock:
         _sessions.clear()
         _confirmed_phones.clear()
+    from app.services.report_service import reset_reports
+
+    reset_reports()

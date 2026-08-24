@@ -4,6 +4,7 @@ from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
+from app.services.report_service import handle_transcript_event
 from app.services.webhook_service import (
     save_transcript_event,
     verify_clawops_signature,
@@ -63,4 +64,11 @@ async def receive_transcript_webhook(request: Request) -> Response:
         event,
         params["CallId"],
     )
+    try:
+        await handle_transcript_event(params)
+    except Exception:
+        logger.exception(
+            "Failed to build final report from webhook: call_id=%s",
+            params["CallId"],
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

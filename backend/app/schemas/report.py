@@ -9,6 +9,7 @@ class BehaviorItem(BaseModel):
 
 
 class TrainingReport(BaseModel):
+    score: int = Field(default=60, ge=0, le=100)
     suspected: bool
     gaveName: bool
     triedHangup: bool

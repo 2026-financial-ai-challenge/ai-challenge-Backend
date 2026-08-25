@@ -21,6 +21,7 @@ class TrainingReportRecord(Base):
     )
     status: Mapped[str] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(20))
+    score: Mapped[int] = mapped_column(Integer, default=60, server_default="60")
     suspected: Mapped[bool] = mapped_column(Boolean)
     gave_name: Mapped[bool] = mapped_column(Boolean)
     tried_hangup: Mapped[bool] = mapped_column(Boolean)

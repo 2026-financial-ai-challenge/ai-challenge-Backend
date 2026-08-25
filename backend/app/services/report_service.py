@@ -30,6 +30,25 @@ logger = logging.getLogger(__name__)
 Role = Literal["user", "assistant"]
 ReportStatus = Literal["none", "pending", "draft", "final", "failed"]
 
+BASE_RESPONSE_SCORE = 60
+RISK_SCORE_WEIGHTS = {
+    "개인정보 제공": -15,
+    "금융정보 제공": -25,
+    "상대방 기관명 신뢰": -10,
+    "송금 의사 표현": -20,
+    "링크 접근 의사": -15,
+    "앱 설치 의사": -20,
+    "통화 장시간 지속": -10,
+}
+DEFENSE_SCORE_WEIGHTS = {
+    "상대방 신원 확인": 8,
+    "공식 대표번호 확인 의사": 15,
+    "개인정보 제공 거절": 15,
+    "송금 거절": 20,
+    "전화 종료(빠른 판단)": 15,
+    "신고 의사 표현": 12,
+}
+
 _HANG_UP = re.compile(
     r"(끊겠|끊을게|끊을게요|끊습니다|전화 끊|나중에 걸|그만하세요|그만 전화)"
 )
@@ -168,10 +187,24 @@ def heuristic_report(transcript: str, *, source: Literal["live", "clawops"]) -> 
     )
     blob = user_text or transcript or ""
     empty = not blob.strip()
+    suspected = bool(_SUSPECT.search(blob))
+    gave_name = bool(_NAME_OFFER.search(blob))
+    tried_hangup = bool(_HANG_UP.search(blob))
+    fallback_score = max(
+        0,
+        min(
+            100,
+            BASE_RESPONSE_SCORE
+            + (8 if suspected else 0)
+            - (15 if gave_name else 0)
+            + (15 if tried_hangup else 0),
+        ),
+    )
     return TrainingReport(
-        suspected=bool(_SUSPECT.search(blob)),
-        gaveName=bool(_NAME_OFFER.search(blob)),
-        triedHangup=bool(_HANG_UP.search(blob)),
+        score=fallback_score,
+        suspected=suspected,
+        gaveName=gave_name,
+        triedHangup=tried_hangup,
         summary=(
             "통화 내용이 거의 없어 바로 평가하기 어렵습니다."
             if empty
@@ -207,15 +240,18 @@ async def score_conversation(
         return heuristic_report(transcript, source=source)
 
     risk_labels, defense_labels = _behavior_labels()
+    risk_behaviors = _keep_known(parsed.riskBehaviors, risk_labels)
+    defense_behaviors = _keep_known(parsed.defenseBehaviors, defense_labels)
     return TrainingReport(
+        score=calculate_response_score(risk_behaviors, defense_behaviors),
         suspected=parsed.suspected,
         gaveName=parsed.gaveName,
         triedHangup=parsed.triedHangup,
         summary=parsed.summary.strip() or heuristic_report(transcript, source=source).summary,
         coaching=parsed.coaching.strip()
         or heuristic_report(transcript, source=source).coaching,
-        riskBehaviors=_keep_known(parsed.riskBehaviors, risk_labels),
-        defenseBehaviors=_keep_known(parsed.defenseBehaviors, defense_labels),
+        riskBehaviors=risk_behaviors,
+        defenseBehaviors=defense_behaviors,
         source=source,
     )
 
@@ -362,6 +398,7 @@ def _report_schema(row: TrainingReportRecord | None) -> TrainingReport | None:
     if row is None:
         return None
     return TrainingReport(
+        score=row.score,
         suspected=row.suspected,
         gaveName=row.gave_name,
         triedHangup=row.tried_hangup,
@@ -394,6 +431,7 @@ def _save_report(
         values = {
             "call_id": call.id if call is not None else None,
             "status": status,
+            "score": report.score,
             "suspected": report.suspected,
             "gave_name": report.gaveName,
             "tried_hangup": report.triedHangup,
@@ -458,6 +496,20 @@ def _to_camel(name: str) -> str:
 
 def _keep_known(items: list[BehaviorItem], allowed: tuple[str, ...]) -> list[BehaviorItem]:
     return [item for item in items if item.label in allowed and item.evidence.strip()]
+
+
+def calculate_response_score(
+    risk_behaviors: list[BehaviorItem],
+    defense_behaviors: list[BehaviorItem],
+) -> int:
+    score = BASE_RESPONSE_SCORE
+    risk_labels = {item.label for item in risk_behaviors}
+    defense_labels = {item.label for item in defense_behaviors}
+    score += sum(RISK_SCORE_WEIGHTS.get(label, 0) for label in risk_labels)
+    score += sum(
+        DEFENSE_SCORE_WEIGHTS.get(label, 0) for label in defense_labels
+    )
+    return max(0, min(100, score))
 
 
 def _behavior_labels() -> tuple[tuple[str, ...], tuple[str, ...]]:

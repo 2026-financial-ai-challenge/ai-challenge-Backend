@@ -10,9 +10,7 @@ services:
     env_file:
       - .env
     environment:
-      # Local Docker cannot resolve Railway's *.railway.internal hostname.
-      # Use Railway's public URL when supplied; otherwise use the local DB service.
-      DATABASE_URL: "${DATABASE_PUBLIC_URL:-postgresql://safety_phishing_user:${LOCAL_DB_PASSWORD:-local_dev_password}@db:5432/safety_phishing_call}"
+      DATABASE_URL: "postgresql://safety_phishing_user:${LOCAL_DB_PASSWORD:-local_dev_password}@db:5432/safety_phishing_call"
       UVICORN_RELOAD: "1"
     depends_on:
       db:

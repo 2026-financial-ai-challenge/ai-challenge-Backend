@@ -22,7 +22,7 @@ from app.schemas.report import (
     TranscriptTurn,
 )
 from app.services.session_service import set_session_call_id, update_report_status
-from app.training.scenarios import ensure_ai_importable
+from app.training.scenarios import ensure_ai_importable, get_call_scenario
 
 
 logger = logging.getLogger(__name__)
@@ -551,10 +551,12 @@ async def _ask_report_llm(
             "\n\nClawOps 일반 요약(초안, 교육 루브릭 아님):\n"
             + json.dumps(clawops_summary, ensure_ascii=False)
         )
+    scenario_note = _scenario_report_note()
     system = f"""
 너는 보이스피싱 모의훈련 코치다. 이 대화는 사전 동의 하의 교육 시뮬레이션이다.
 실제 금감원·검찰·은행 전화가 아니다. 점수나 등급은 매기지 마라.
 {source_note}
+{scenario_note}
 
 반드시 JSON 객체만 반환한다.
 형식:
@@ -595,3 +597,31 @@ async def _ask_report_llm(
         return _LlmReport.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError) as exc:
         raise RuntimeError(f"Report LLM returned invalid JSON: {raw[:500]}") from exc
+
+
+def _scenario_report_note() -> str:
+    try:
+        scenario = get_call_scenario()
+    except Exception:
+        logger.exception("Could not load scenario rubric for report")
+        return ""
+
+    tactics = getattr(scenario, "tactics", ())
+    red_flags = getattr(scenario, "red_flags", ())
+    ideal_response = getattr(scenario, "ideal_trainee_response", None)
+    if not (tactics or red_flags or ideal_response):
+        return ""
+
+    lines = ["[이번 훈련 시나리오 평가 기준]"]
+    if tactics:
+        lines.append("사용된 심리 기법: " + ", ".join(tactics))
+    if red_flags:
+        lines.append("알아챘어야 할 위험 신호:")
+        lines.extend(f"- {flag}" for flag in red_flags)
+    if ideal_response:
+        lines.append(f"권장 대응: {ideal_response}")
+    lines.append(
+        "위 기준은 summary와 coaching 작성에 활용하되, 실제 대화에서 관찰되지 않은 "
+        "행동을 riskBehaviors나 defenseBehaviors에 추가하지 마라."
+    )
+    return "\n".join(lines)

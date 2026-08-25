@@ -19,6 +19,7 @@ from app.services.report_service import (
     heuristic_report,
     register_transcript_listener,
     score_conversation,
+    _scenario_report_note,
 )
 from app.services.session_service import create_session, reset_sessions
 
@@ -163,6 +164,14 @@ def test_score_conversation_uses_llm_and_filters_labels():
     assert report.gaveName is True
     assert [item.label for item in report.riskBehaviors] == ["개인정보 제공"]
     assert report.source == "live"
+
+
+def test_report_prompt_uses_jsonl_rubric(monkeypatch):
+    monkeypatch.setenv("CALL_SCENARIO", "scam_001")
+    note = _scenario_report_note()
+    assert "권위 사칭" in note
+    assert "알아챘어야 할 위험 신호" in note
+    assert "112/1332" in note
 
 
 def test_score_conversation_falls_back_on_bad_json():

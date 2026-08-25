@@ -11,18 +11,27 @@ from app.training.pipeline_session import (
     should_hang_up_now,
     wants_hang_up,
 )
-from app.training.scenarios import get_call_scenario
+from app.training.scenarios import ensure_ai_importable, get_call_scenario
 
 
-def test_default_call_scenario_is_institution_impersonation():
+def test_default_call_scenario_uses_jsonl_dataset(monkeypatch):
+    monkeypatch.delenv("CALL_SCENARIO", raising=False)
     scenario = get_call_scenario()
-    assert scenario.id == "institution_impersonation"
-    assert "김정훈" in scenario.opening_line
-    assert scenario.max_turns == 12
-    assert "삼십만 원" in scenario.system_prompt
-    assert "성함" in scenario.system_prompt
-    assert "일상적인 전화" in scenario.system_prompt
-    assert "고객센터 종결" in scenario.system_prompt
+    assert scenario.id == "scam_001"
+    assert "김민석" in scenario.opening_line
+    assert scenario.max_turns == 8
+    assert scenario.tactics == ("권위 사칭", "공포 유발", "긴급성 조성")
+    assert "안전계좌" in scenario.system_prompt
+    assert scenario.red_flags
+    assert "112/1332" in scenario.ideal_trainee_response
+
+
+def test_jsonl_dataset_registers_all_scenarios():
+    ensure_ai_importable()
+    from ai.scenarios import SCENARIOS
+
+    for index in range(1, 11):
+        assert f"scam_{index:03d}" in SCENARIOS
 
 
 def test_call_scenario_env_override(monkeypatch):
@@ -92,7 +101,7 @@ def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
     assert session._llm._max_tokens == 180
     assert session._opening_line == scenario.opening_line
     assert session._max_turns == scenario.max_turns
-    assert "김정훈" in session._system_prompt
+    assert scenario.opening_line in session._system_prompt
     assert session._greeting is True
 
 

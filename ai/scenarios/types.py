@@ -13,3 +13,8 @@ class Scenario:
     tts_voice_id: str | None = None
     tts_stability: float = 0.4
     tts_similarity_boost: float = 0.75
+    subtype: str | None = None
+    difficulty: str | None = None
+    tactics: tuple[str, ...] = ()
+    red_flags: tuple[str, ...] = ()
+    ideal_trainee_response: str | None = None

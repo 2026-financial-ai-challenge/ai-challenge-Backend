@@ -26,9 +26,9 @@ def get_call_scenario():
     ensure_ai_importable()
     from ai.scenarios import SCENARIOS, get_scenario
 
-    scenario_id = os.getenv("CALL_SCENARIO", "institution_impersonation").strip()
+    scenario_id = os.getenv("CALL_SCENARIO", "scam_001").strip()
     if not scenario_id:
-        scenario_id = "institution_impersonation"
+        scenario_id = "scam_001"
     try:
         return get_scenario(scenario_id)
     except KeyError as exc:

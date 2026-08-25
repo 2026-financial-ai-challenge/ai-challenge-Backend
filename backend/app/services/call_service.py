@@ -2,8 +2,13 @@ import asyncio
 import inspect
 import logging
 import os
+from datetime import datetime, timezone
 from threading import Thread
 
+from sqlalchemy import select
+
+from app.database import SessionLocal
+from app.models.call import Call
 from app.services.report_service import (
     bind_call,
     build_draft_report,
@@ -162,6 +167,35 @@ def _make_clawops_agent(from_number: str, scenario):
     return ClawOpsAgent(**_supported_kwargs(ClawOpsAgent, **kwargs))
 
 
+def _pipeline_configured() -> bool:
+    return all(
+        os.getenv(name, "").strip()
+        for name in ("DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY")
+    )
+
+
+def _make_realtime_agent(from_number: str, scenario):
+    try:
+        from clawops.agent import ClawOpsAgent, OpenAIRealtime
+    except ImportError as exc:
+        raise CallConfigurationError(
+            "ClawOps OpenAI Realtime dependencies are missing; rebuild the backend image"
+        ) from exc
+
+    logger.warning(
+        "DEEPGRAM_API_KEY or ELEVENLABS_API_KEY is missing; "
+        "falling back to OpenAI Realtime"
+    )
+    return ClawOpsAgent(
+        from_=from_number,
+        session=OpenAIRealtime(
+            system_prompt=scenario.system_prompt,
+            voice=os.getenv("CLAWOPS_VOICE", "marin"),
+            language="ko",
+        ),
+    )
+
+
 async def start_outbound_call(session_id: str) -> str:
     agent, call_session = await _create_outbound_call(session_id)
     asyncio.create_task(_monitor_call(session_id, agent, call_session))
@@ -180,8 +214,6 @@ async def _create_outbound_call(session_id: str):
     _require_env("CLAWOPS_ACCOUNT_ID")
     from_number = _require_env("CLAWOPS_PHONE_NUMBER")
     _require_env("OPENAI_API_KEY")
-    _require_env("DEEPGRAM_API_KEY")
-    _require_env("ELEVENLABS_API_KEY")
 
     try:
         scenario = get_call_scenario()
@@ -194,7 +226,11 @@ async def _create_outbound_call(session_id: str):
         scenario.id,
     )
 
-    agent = _make_clawops_agent(from_number, scenario)
+    agent = (
+        _make_clawops_agent(from_number, scenario)
+        if _pipeline_configured()
+        else _make_realtime_agent(from_number, scenario)
+    )
     register_transcript_listener(agent, session_id)
 
     try:
@@ -227,8 +263,10 @@ async def _monitor_call(session_id: str, agent, call_session) -> None:
     try:
         await call_session.wait()
         update_call_status(session_id, "completed")
+        _complete_call(call_session.call_id)
     except Exception:
         update_call_status(session_id, "waiting")
+        _fail_call(call_session.call_id, "ClawOps call failed")
         logger.exception("ClawOps call failed: session_id=%s", session_id)
     finally:
         try:
@@ -269,3 +307,24 @@ def _run_training_call(session_id: str) -> None:
 async def _start_and_monitor_call(session_id: str) -> None:
     agent, call_session = await _create_outbound_call(session_id)
     await _monitor_call(session_id, agent, call_session)
+
+
+def _complete_call(clawops_call_id: str) -> None:
+    with SessionLocal.begin() as db:
+        call = db.scalar(
+            select(Call).where(Call.clawops_call_id == clawops_call_id)
+        )
+        if call is not None:
+            call.status = "completed"
+            call.completed_at = datetime.now(timezone.utc)
+
+
+def _fail_call(clawops_call_id: str, reason: str) -> None:
+    with SessionLocal.begin() as db:
+        call = db.scalar(
+            select(Call).where(Call.clawops_call_id == clawops_call_id)
+        )
+        if call is not None:
+            call.status = "failed"
+            call.failure_reason = reason
+            call.completed_at = datetime.now(timezone.utc)

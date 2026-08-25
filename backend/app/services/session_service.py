@@ -1,122 +1,150 @@
 from datetime import datetime, timezone
-from threading import Lock
 from typing import Literal
 from uuid import uuid4
 
+from sqlalchemy import delete, select
+from sqlalchemy.orm import selectinload
+
+from app.database import SessionLocal
+from app.models.call import Call
+from app.models.consent import Consent
+from app.models.participant import Participant
+from app.models.training_session import TrainingSession
+from app.models.transcript_event import TranscriptEvent
 from app.schemas.consent import ConsentRecord, SessionResponse
-
-
-_sessions: dict[str, SessionResponse] = {}
-_confirmed_phones: dict[str, str] = {}
-_sessions_lock = Lock()
 
 
 def create_session(privacy: bool, unannounced_training: bool) -> SessionResponse:
     now = datetime.now(timezone.utc)
-    session = SessionResponse(
-        id=f"ses_{uuid4().hex}",
-        phoneNumberMasked=None,
-        callStatus=None,
-        callId=None,
-        reportStatus=None,
-        currentTrainingType="announced",
-        consents=ConsentRecord(
-            privacy=privacy,
-            unannouncedTraining=unannounced_training,
-            consentedAt=now,
-        ),
-        createdAt=now,
-        updatedAt=now,
-    )
-
-    with _sessions_lock:
-        _sessions[session.id] = session
-
-    return session
+    with SessionLocal.begin() as db:
+        session = TrainingSession(
+            id=f"ses_{uuid4().hex}",
+            current_training_type="announced",
+            created_at=now,
+            updated_at=now,
+        )
+        session.consent = Consent(
+            privacy_agreed=privacy,
+            surprise_call_agreed=unannounced_training,
+            consented_at=now,
+        )
+        db.add(session)
+        db.flush()
+        return _to_response(session)
 
 
 def get_session(session_id: str) -> SessionResponse | None:
-    with _sessions_lock:
-        session = _sessions.get(session_id)
-        if session is None:
-            return None
-        return session.model_copy(deep=True)
+    with SessionLocal() as db:
+        session = db.scalar(_session_query(session_id))
+        return _to_response(session) if session is not None else None
 
 
 def session_exists(session_id: str) -> bool:
-    with _sessions_lock:
-        return session_id in _sessions
+    with SessionLocal() as db:
+        return db.get(TrainingSession, session_id) is not None
 
 
 def confirm_verified_phone(session_id: str, phone_number: str) -> SessionResponse | None:
-    with _sessions_lock:
-        session = _sessions.get(session_id)
+    masked = mask_phone_number(phone_number)
+    now = datetime.now(timezone.utc)
+    with SessionLocal.begin() as db:
+        session = db.scalar(_session_query(session_id))
         if session is None:
             return None
 
-        session.phoneNumberMasked = mask_phone_number(phone_number)
-        session.callStatus = "waiting"
-        session.updatedAt = datetime.now(timezone.utc)
-        _confirmed_phones[session_id] = phone_number
-        return session.model_copy(deep=True)
+        participant = db.scalar(
+            select(Participant).where(Participant.phone_number == phone_number)
+        )
+        if participant is None:
+            participant = Participant(
+                phone_number=phone_number,
+                phone_number_masked=masked,
+            )
+            db.add(participant)
+            db.flush()
+        else:
+            participant.phone_number_masked = masked
+            participant.updated_at = now
+
+        session.participant = participant
+        session.call_status = "waiting"
+        session.updated_at = now
+        session.consent.participant = participant
+        db.flush()
+        return _to_response(session)
 
 
 def get_phone_number(session_id: str) -> str | None:
-    with _sessions_lock:
-        return _confirmed_phones.get(session_id)
+    with SessionLocal() as db:
+        return db.scalar(
+            select(Participant.phone_number)
+            .join(TrainingSession, TrainingSession.participant_id == Participant.id)
+            .where(TrainingSession.id == session_id)
+        )
 
 
 def update_call_status(
     session_id: str,
     call_status: Literal["waiting", "calling", "completed"],
 ) -> SessionResponse | None:
-    with _sessions_lock:
-        session = _sessions.get(session_id)
+    with SessionLocal.begin() as db:
+        session = db.scalar(_session_query(session_id))
         if session is None:
             return None
 
-        session.callStatus = call_status
-        session.updatedAt = datetime.now(timezone.utc)
-        return session.model_copy(deep=True)
+        session.call_status = call_status
+        session.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        return _to_response(session)
 
 
 def attach_call(session_id: str, call_id: str) -> SessionResponse | None:
-    with _sessions_lock:
-        session = _sessions.get(session_id)
+    with SessionLocal.begin() as db:
+        session = db.scalar(_session_query(session_id))
         if session is None:
             return None
 
-        session.callId = call_id
-        session.callStatus = "calling"
-        if session.reportStatus is None:
-            session.reportStatus = "pending"
-        session.updatedAt = datetime.now(timezone.utc)
-        return session.model_copy(deep=True)
+        call = db.scalar(select(Call).where(Call.clawops_call_id == call_id))
+        if call is None:
+            db.add(Call(session_id=session_id, clawops_call_id=call_id, status="calling"))
+        else:
+            call.session_id = session_id
+            call.status = "calling"
+        session.call_status = "calling"
+        if session.report_status is None:
+            session.report_status = "pending"
+        session.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        return _to_response(session)
 
 
 def set_session_call_id(session_id: str, call_id: str) -> SessionResponse | None:
-    with _sessions_lock:
-        session = _sessions.get(session_id)
+    with SessionLocal.begin() as db:
+        session = db.scalar(_session_query(session_id))
         if session is None:
             return None
 
-        session.callId = call_id
-        session.updatedAt = datetime.now(timezone.utc)
-        return session.model_copy(deep=True)
+        call = db.scalar(select(Call).where(Call.clawops_call_id == call_id))
+        if call is None:
+            db.add(Call(session_id=session_id, clawops_call_id=call_id, status="calling"))
+        session.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        return _to_response(session)
 
 
 def update_report_status(
     session_id: str,
     report_status: Literal["none", "pending", "draft", "final", "failed"],
 ) -> SessionResponse | None:
-    with _sessions_lock:
-        session = _sessions.get(session_id)
+    with SessionLocal.begin() as db:
+        session = db.scalar(_session_query(session_id))
         if session is None:
             return None
 
-        session.reportStatus = report_status
-        session.updatedAt = datetime.now(timezone.utc)
-        return session.model_copy(deep=True)
+        session.report_status = report_status
+        session.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        return _to_response(session)
 
 
 def mask_phone_number(phone_number: str) -> str:
@@ -126,9 +154,48 @@ def mask_phone_number(phone_number: str) -> str:
 
 
 def reset_sessions() -> None:
-    with _sessions_lock:
-        _sessions.clear()
-        _confirmed_phones.clear()
+    with SessionLocal.begin() as db:
+        db.execute(delete(TranscriptEvent))
+        db.execute(delete(Call))
+        db.execute(delete(Consent))
+        db.execute(delete(TrainingSession))
+        db.execute(delete(Participant))
     from app.services.report_service import reset_reports
 
     reset_reports()
+
+
+def _session_query(session_id: str):
+    return (
+        select(TrainingSession)
+        .options(
+            selectinload(TrainingSession.consent),
+            selectinload(TrainingSession.participant),
+            selectinload(TrainingSession.calls),
+        )
+        .where(TrainingSession.id == session_id)
+    )
+
+
+def _to_response(session: TrainingSession) -> SessionResponse:
+    consent = session.consent
+    latest_call = max(session.calls, key=lambda call: call.created_at, default=None)
+    return SessionResponse(
+        id=session.id,
+        phoneNumberMasked=(
+            session.participant.phone_number_masked
+            if session.participant is not None
+            else None
+        ),
+        callStatus=session.call_status,
+        callId=latest_call.clawops_call_id if latest_call is not None else None,
+        reportStatus=session.report_status,
+        currentTrainingType=session.current_training_type,
+        consents=ConsentRecord(
+            privacy=consent.privacy_agreed,
+            unannouncedTraining=consent.surprise_call_agreed,
+            consentedAt=consent.consented_at,
+        ),
+        createdAt=session.created_at,
+        updatedAt=session.updated_at,
+    )

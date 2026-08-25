@@ -5,19 +5,21 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.schemas.report import TrainingReport, TranscriptTurn
+from app.schemas.report import BehaviorItem, TrainingReport, TranscriptTurn
 from app.services import report_service
 from app.services.report_service import (
     append_turn,
     bind_call,
     build_draft_report,
     build_final_report,
+    calculate_response_score,
     format_clawops_segments,
     format_live_turns,
     get_report,
     heuristic_report,
     register_transcript_listener,
     score_conversation,
+    _scenario_report_note,
 )
 from app.services.session_service import create_session, reset_sessions
 
@@ -95,6 +97,55 @@ def test_heuristic_report_flags():
     assert report.source == "live"
 
 
+def test_response_score_applies_behavior_weights_and_clamps():
+    score = calculate_response_score(
+        [
+            BehaviorItem(label="개인정보 제공", evidence="이름을 말함"),
+            BehaviorItem(label="금융정보 제공", evidence="계좌번호를 말함"),
+        ],
+        [
+            BehaviorItem(label="상대방 신원 확인", evidence="어디 소속인가요"),
+            BehaviorItem(label="전화 종료(빠른 판단)", evidence="끊겠습니다"),
+        ],
+    )
+    assert score == 43
+
+    assert calculate_response_score(
+        [
+            BehaviorItem(label=label, evidence="x")
+            for label in (
+                "개인정보 제공",
+                "금융정보 제공",
+                "상대방 기관명 신뢰",
+                "송금 의사 표현",
+                "링크 접근 의사",
+                "앱 설치 의사",
+                "통화 장시간 지속",
+            )
+        ],
+        [],
+    ) == 0
+    assert calculate_response_score(
+        [],
+        [
+            BehaviorItem(label=label, evidence="x")
+            for label in (
+                "상대방 신원 확인",
+                "공식 대표번호 확인 의사",
+                "개인정보 제공 거절",
+                "송금 거절",
+                "전화 종료(빠른 판단)",
+                "신고 의사 표현",
+            )
+        ],
+    ) == 100
+
+    assert calculate_response_score(
+        [],
+        [BehaviorItem(label="송금 거절", evidence="x")] * 2,
+    ) == 80
+
+
 def test_score_conversation_uses_llm_and_filters_labels():
     raw = _llm_payload(
         riskBehaviors=[
@@ -109,9 +160,18 @@ def test_score_conversation_uses_llm_and_filters_labels():
             client=_fake_openai(raw),
         )
     )
+    assert report.score == 60
     assert report.gaveName is True
     assert [item.label for item in report.riskBehaviors] == ["개인정보 제공"]
     assert report.source == "live"
+
+
+def test_report_prompt_uses_jsonl_rubric(monkeypatch):
+    monkeypatch.setenv("CALL_SCENARIO", "scam_001")
+    note = _scenario_report_note()
+    assert "권위 사칭" in note
+    assert "알아챘어야 할 위험 신호" in note
+    assert "112/1332" in note
 
 
 def test_score_conversation_falls_back_on_bad_json():
@@ -232,10 +292,12 @@ def test_transcript_webhook_builds_final(monkeypatch):
             coaching="끊으세요",
             source="clawops",
         )
-        with report_service._lock:
-            record = report_service._ensure_locked(sid)
-            record.final = report
-            record.status = "final"
+        report_service._save_report(
+            sid,
+            report,
+            status="final",
+            call_id=call_id,
+        )
         from app.services.session_service import update_report_status
 
         update_report_status(sid, "final")

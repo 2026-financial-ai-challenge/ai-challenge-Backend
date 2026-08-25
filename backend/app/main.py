@@ -19,7 +19,7 @@ logging.getLogger("clawops.agent").setLevel(logging.INFO)
 logging.getLogger(__name__).info(
     "Phone verify: Octomo (%s) · call AI: PipelineSession (%s)",
     "configured" if os.getenv("OCTOMO_API_KEY") else "API key missing",
-    os.getenv("CALL_SCENARIO", "institution_impersonation"),
+    os.getenv("CALL_SCENARIO", "scam_001"),
 )
 
 

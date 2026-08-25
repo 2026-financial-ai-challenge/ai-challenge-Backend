@@ -67,6 +67,15 @@ def test_supported_kwargs_drops_unknown_params():
     assert kwargs == {"voice_id": "abc", "model": "eleven_turbo_v2_5"}
 
 
+def test_call_service_runtime_dependencies_are_imported():
+    from app.services import call_service
+
+    assert callable(call_service.register_transcript_listener)
+    assert callable(call_service.bind_call)
+    assert call_service.SessionLocal is not None
+    assert call_service.Call is not None
+
+
 def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
     monkeypatch.delenv("ELEVENLABS_VOICE_ID", raising=False)
     monkeypatch.delenv("ELEVENLABS_STABILITY", raising=False)

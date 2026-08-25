@@ -36,3 +36,9 @@ class TrainingSession(Base):
     calls: Mapped[list["Call"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+    transcript_turns: Mapped[list["TranscriptTurnRecord"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+    reports: Mapped[list["TrainingReportRecord"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )

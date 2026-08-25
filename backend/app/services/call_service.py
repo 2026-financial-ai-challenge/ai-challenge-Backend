@@ -5,6 +5,16 @@ import os
 from datetime import datetime, timezone
 from threading import Thread
 
+from sqlalchemy import select
+
+from app.database import SessionLocal
+from app.models.call import Call
+from app.services.report_service import (
+    bind_call,
+    build_draft_report,
+    register_transcript_listener,
+    request_clawops_transcript,
+)
 from app.services.session_service import (
     attach_call,
     get_phone_number,
@@ -157,6 +167,35 @@ def _make_clawops_agent(from_number: str, scenario):
     return ClawOpsAgent(**_supported_kwargs(ClawOpsAgent, **kwargs))
 
 
+def _pipeline_configured() -> bool:
+    return all(
+        os.getenv(name, "").strip()
+        for name in ("DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY")
+    )
+
+
+def _make_realtime_agent(from_number: str, scenario):
+    try:
+        from clawops.agent import ClawOpsAgent, OpenAIRealtime
+    except ImportError as exc:
+        raise CallConfigurationError(
+            "ClawOps OpenAI Realtime dependencies are missing; rebuild the backend image"
+        ) from exc
+
+    logger.warning(
+        "DEEPGRAM_API_KEY or ELEVENLABS_API_KEY is missing; "
+        "falling back to OpenAI Realtime"
+    )
+    return ClawOpsAgent(
+        from_=from_number,
+        session=OpenAIRealtime(
+            system_prompt=scenario.system_prompt,
+            voice=os.getenv("CLAWOPS_VOICE", "marin"),
+            language="ko",
+        ),
+    )
+
+
 async def start_outbound_call(session_id: str) -> str:
     agent, call_session = await _create_outbound_call(session_id)
     asyncio.create_task(_monitor_call(session_id, agent, call_session))
@@ -175,8 +214,6 @@ async def _create_outbound_call(session_id: str):
     _require_env("CLAWOPS_ACCOUNT_ID")
     from_number = _require_env("CLAWOPS_PHONE_NUMBER")
     _require_env("OPENAI_API_KEY")
-    _require_env("DEEPGRAM_API_KEY")
-    _require_env("ELEVENLABS_API_KEY")
 
     try:
         scenario = get_call_scenario()
@@ -189,7 +226,11 @@ async def _create_outbound_call(session_id: str):
         scenario.id,
     )
 
-    agent = _make_clawops_agent(from_number, scenario)
+    agent = (
+        _make_clawops_agent(from_number, scenario)
+        if _pipeline_configured()
+        else _make_realtime_agent(from_number, scenario)
+    )
     register_transcript_listener(agent, session_id)
 
     try:

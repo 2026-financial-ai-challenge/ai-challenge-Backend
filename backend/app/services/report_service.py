@@ -5,11 +5,15 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
-from threading import Lock
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import delete, func, select
+
+from app.database import SessionLocal
+from app.models.call import Call
+from app.models.training_report import TrainingReportRecord
+from app.models.transcript_turn import TranscriptTurnRecord
 
 from app.schemas.report import (
     BehaviorItem,
@@ -47,40 +51,18 @@ class _LlmReport(BaseModel):
     defenseBehaviors: list[BehaviorItem] = Field(default_factory=list)
 
 
-@dataclass
-class _SessionReport:
-    session_id: str
-    call_id: str | None = None
-    status: ReportStatus = "none"
-    turns: list[TranscriptTurn] = field(default_factory=list)
-    draft: TrainingReport | None = None
-    final: TrainingReport | None = None
-    clawops_summary: dict[str, Any] | None = None
-
-
-_reports: dict[str, _SessionReport] = {}
-_call_to_session: dict[str, str] = {}
-_lock = Lock()
-
-
 def reset_reports() -> None:
-    with _lock:
-        _reports.clear()
-        _call_to_session.clear()
+    with SessionLocal.begin() as db:
+        db.execute(delete(TrainingReportRecord))
+        db.execute(delete(TranscriptTurnRecord))
 
 
 def session_id_for_call(call_id: str) -> str | None:
-    with _lock:
-        return _call_to_session.get(call_id)
+    with SessionLocal() as db:
+        return db.scalar(select(Call.session_id).where(Call.clawops_call_id == call_id))
 
 
 def bind_call(session_id: str, call_id: str) -> None:
-    with _lock:
-        record = _ensure_locked(session_id)
-        record.call_id = call_id
-        if record.status == "none":
-            record.status = "pending"
-        _call_to_session[call_id] = session_id
     set_session_call_id(session_id, call_id)
     update_report_status(session_id, "pending")
 
@@ -95,31 +77,64 @@ def append_turn(
     cleaned = (text or "").strip()
     if role not in {"user", "assistant"} or not cleaned:
         return
-    with _lock:
-        record = _ensure_locked(session_id)
-        if call_id:
-            record.call_id = call_id
-            _call_to_session[call_id] = session_id
-        if record.status == "none":
-            record.status = "pending"
-        record.turns.append(TranscriptTurn(role=role, text=cleaned))
     if call_id:
         set_session_call_id(session_id, call_id)
+    with SessionLocal.begin() as db:
+        call = _get_call(db, call_id) if call_id else _latest_call(db, session_id)
+        sequence = db.scalar(
+            select(func.coalesce(func.max(TranscriptTurnRecord.sequence), 0)).where(
+                TranscriptTurnRecord.session_id == session_id,
+                TranscriptTurnRecord.source == "live",
+            )
+        )
+        db.add(
+            TranscriptTurnRecord(
+                session_id=session_id,
+                call_id=call.id if call is not None else None,
+                role=role,
+                text=cleaned,
+                source="live",
+                sequence=int(sequence or 0) + 1,
+            )
+        )
+    update_report_status(session_id, "pending")
 
 
 def get_report(session_id: str) -> GetReportResponse:
-    with _lock:
-        record = _reports.get(session_id)
-        if record is None:
-            return GetReportResponse(sessionId=session_id, status="none")
+    with SessionLocal() as db:
+        call = _latest_call(db, session_id)
+        turns = db.scalars(
+            select(TranscriptTurnRecord)
+            .where(
+                TranscriptTurnRecord.session_id == session_id,
+                TranscriptTurnRecord.source == "live",
+            )
+            .order_by(TranscriptTurnRecord.sequence)
+        ).all()
+        reports = db.scalars(
+            select(TrainingReportRecord).where(
+                TrainingReportRecord.session_id == session_id
+            )
+        ).all()
+        draft_row = next((row for row in reports if row.source == "live"), None)
+        final_row = next((row for row in reports if row.source == "clawops"), None)
+        status: ReportStatus = (
+            "final"
+            if final_row is not None
+            else "draft"
+            if draft_row is not None
+            else "pending"
+            if call is not None or turns
+            else "none"
+        )
         return GetReportResponse(
-            sessionId=record.session_id,
-            callId=record.call_id,
-            status=record.status,
-            turns=list(record.turns),
-            draft=record.draft,
-            final=record.final,
-            clawopsSummary=record.clawops_summary,
+            sessionId=session_id,
+            callId=call.clawops_call_id if call is not None else None,
+            status=status,
+            turns=[TranscriptTurn(role=row.role, text=row.text) for row in turns],
+            draft=_report_schema(draft_row),
+            final=_report_schema(final_row),
+            clawopsSummary=final_row.clawops_summary if final_row is not None else None,
         )
 
 
@@ -206,17 +221,11 @@ async def score_conversation(
 
 
 async def build_draft_report(session_id: str, *, client: Any | None = None) -> TrainingReport:
-    with _lock:
-        record = _ensure_locked(session_id)
-        turns = list(record.turns)
+    turns = get_report(session_id).turns
     transcript = format_live_turns(turns)
     report = await score_conversation(transcript, source="live", client=client)
-    with _lock:
-        record = _ensure_locked(session_id)
-        record.draft = report
-        if record.status != "final":
-            record.status = "draft"
-        status = record.status
+    _save_report(session_id, report, status="draft")
+    status: ReportStatus = "final" if get_report(session_id).final is not None else "draft"
     update_report_status(session_id, status)
     logger.info("Draft report ready session=%s turns=%s", session_id, len(turns))
     return report
@@ -290,12 +299,14 @@ async def build_final_report(
         clawops_summary=summary,
         client=client,
     )
-    with _lock:
-        record = _ensure_locked(session_id)
-        record.call_id = call_id
-        record.final = report
-        record.clawops_summary = summary
-        record.status = "final"
+    _replace_clawops_turns(session_id, call_id, segments)
+    _save_report(
+        session_id,
+        report,
+        status="final",
+        call_id=call_id,
+        clawops_summary=summary,
+    )
     update_report_status(session_id, "final")
     logger.info("Final report ready session=%s call_id=%s", session_id, call_id)
     return report
@@ -332,12 +343,106 @@ def register_transcript_listener(agent: Any, session_id: str) -> None:
     agent.on("transcript")(on_transcript)
 
 
-def _ensure_locked(session_id: str) -> _SessionReport:
-    record = _reports.get(session_id)
-    if record is None:
-        record = _SessionReport(session_id=session_id)
-        _reports[session_id] = record
-    return record
+def _latest_call(db: Any, session_id: str) -> Call | None:
+    return db.scalar(
+        select(Call)
+        .where(Call.session_id == session_id)
+        .order_by(Call.created_at.desc(), Call.id.desc())
+        .limit(1)
+    )
+
+
+def _get_call(db: Any, clawops_call_id: str | None) -> Call | None:
+    if not clawops_call_id:
+        return None
+    return db.scalar(select(Call).where(Call.clawops_call_id == clawops_call_id))
+
+
+def _report_schema(row: TrainingReportRecord | None) -> TrainingReport | None:
+    if row is None:
+        return None
+    return TrainingReport(
+        suspected=row.suspected,
+        gaveName=row.gave_name,
+        triedHangup=row.tried_hangup,
+        summary=row.summary,
+        coaching=row.coaching,
+        riskBehaviors=[BehaviorItem.model_validate(item) for item in row.risk_behaviors],
+        defenseBehaviors=[
+            BehaviorItem.model_validate(item) for item in row.defense_behaviors
+        ],
+        source=row.source,
+    )
+
+
+def _save_report(
+    session_id: str,
+    report: TrainingReport,
+    *,
+    status: Literal["draft", "final"],
+    call_id: str | None = None,
+    clawops_summary: dict[str, Any] | None = None,
+) -> None:
+    with SessionLocal.begin() as db:
+        call = _get_call(db, call_id) if call_id else _latest_call(db, session_id)
+        row = db.scalar(
+            select(TrainingReportRecord).where(
+                TrainingReportRecord.session_id == session_id,
+                TrainingReportRecord.source == report.source,
+            )
+        )
+        values = {
+            "call_id": call.id if call is not None else None,
+            "status": status,
+            "suspected": report.suspected,
+            "gave_name": report.gaveName,
+            "tried_hangup": report.triedHangup,
+            "summary": report.summary,
+            "coaching": report.coaching,
+            "risk_behaviors": [item.model_dump() for item in report.riskBehaviors],
+            "defense_behaviors": [
+                item.model_dump() for item in report.defenseBehaviors
+            ],
+            "clawops_summary": clawops_summary,
+        }
+        if row is None:
+            db.add(
+                TrainingReportRecord(
+                    session_id=session_id,
+                    source=report.source,
+                    **values,
+                )
+            )
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
+
+
+def _replace_clawops_turns(session_id: str, call_id: str, segments: Any) -> None:
+    with SessionLocal.begin() as db:
+        call = _get_call(db, call_id)
+        db.execute(
+            delete(TranscriptTurnRecord).where(
+                TranscriptTurnRecord.session_id == session_id,
+                TranscriptTurnRecord.source == "clawops",
+            )
+        )
+        sequence = 0
+        for segment in segments or []:
+            text = str(_attr(segment, "text") or "").strip()
+            if not text:
+                continue
+            sequence += 1
+            db.add(
+                TranscriptTurnRecord(
+                    session_id=session_id,
+                    call_id=call.id if call is not None else None,
+                    role="user" if _attr(segment, "speaker") == "CUSTOMER" else "assistant",
+                    text=text,
+                    source="clawops",
+                    sequence=sequence,
+                )
+            )
 
 
 def _attr(obj: Any, name: str) -> Any:

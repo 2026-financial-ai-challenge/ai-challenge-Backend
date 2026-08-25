@@ -232,10 +232,12 @@ def test_transcript_webhook_builds_final(monkeypatch):
             coaching="끊으세요",
             source="clawops",
         )
-        with report_service._lock:
-            record = report_service._ensure_locked(sid)
-            record.final = report
-            record.status = "final"
+        report_service._save_report(
+            sid,
+            report,
+            status="final",
+            call_id=call_id,
+        )
         from app.services.session_service import update_report_status
 
         update_report_status(sid, "final")

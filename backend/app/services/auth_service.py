@@ -49,12 +49,12 @@ def request_signup_otp(db: Session, phone: str) -> RequestSignupOtpResponse:
         phone_number=phone, code_hash=_digest(f"{phone}:{code}"),
         expires_at=now + timedelta(seconds=OTP_TTL_SEC), created_at=now,
     ))
-    db.commit()
     try:
         send_verification_code(phone, code)
     except Exception:
         db.rollback()
         raise ApiError(502, "SMS_SEND_FAILED", "인증번호 발송에 실패했습니다.") from None
+    db.commit()
     return RequestSignupOtpResponse(
         phoneNumberMasked=mask_phone_number(phone), expiresInSec=OTP_TTL_SEC,
         resendAvailableInSec=60, devCode=code if expose_dev_code() else None,

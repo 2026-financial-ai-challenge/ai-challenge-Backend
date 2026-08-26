@@ -17,8 +17,13 @@ load_dotenv(_REPO_DIR / "ai" / ".env", override=False)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
 logging.getLogger("clawops.agent").setLevel(logging.INFO)
 logging.getLogger(__name__).info(
-    "Phone verify: Octomo (%s) · call AI: PipelineSession (%s)",
-    "configured" if os.getenv("OCTOMO_API_KEY") else "API key missing",
+    "Signup SMS: ClawOps (%s) · call AI: PipelineSession (%s)",
+    "configured"
+    if all(
+        os.getenv(name)
+        for name in ("CLAWOPS_API_KEY", "CLAWOPS_ACCOUNT_ID", "CLAWOPS_SMS_FROM")
+    )
+    else "configuration missing",
     os.getenv("CALL_SCENARIO", "scam_001"),
 )
 

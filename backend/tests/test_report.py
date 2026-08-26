@@ -279,10 +279,7 @@ def test_draft_then_final_report(monkeypatch):
 
 def test_get_report_api_none_then_draft(monkeypatch):
     client = _client()
-    session_id = client.post(
-        "/v1/consents",
-        json={"privacy": True, "unannouncedTraining": True},
-    ).json()["sessionId"]
+    session_id = _session_id()
 
     empty = client.get(f"/v1/sessions/{session_id}/report")
     assert empty.status_code == 200
@@ -316,10 +313,7 @@ def test_get_report_api_none_then_draft(monkeypatch):
 
 def test_transcript_webhook_builds_final(monkeypatch):
     client = _client()
-    session_id = client.post(
-        "/v1/consents",
-        json={"privacy": True, "unannouncedTraining": True},
-    ).json()["sessionId"]
+    session_id = _session_id()
     bind_call(session_id, "CAhook")
     monkeypatch.delenv("CLAWOPS_WEBHOOK_SIGNING_SECRET", raising=False)
 

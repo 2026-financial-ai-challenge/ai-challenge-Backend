@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.errors import ApiError
-from app.routers import call, consent, report, session, webhook
+from app.routers import auth, call, consent, report, session, webhook
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _REPO_DIR = Path(__file__).resolve().parents[2]
@@ -53,6 +53,7 @@ def root():
 
 
 app.include_router(consent.router)
+app.include_router(auth.router)
 app.include_router(session.router)
 app.include_router(call.router)
 app.include_router(report.router)

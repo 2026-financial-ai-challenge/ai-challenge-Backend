@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from ai.safety import SAFETY_RULES
 from ai.scenarios.types import Scenario
-from ai.voices import THEO
+from ai.voices import Onyu
 
 SCENARIO = Scenario(
     id="card_payment_fraud",
     name="카드결제형",
     max_turns=6,
-    tts_voice_id=THEO,
-    tts_stability=0.4,
-    tts_similarity_boost=0.75,
+    tts_voice_id=Onyu,
+    tts_stability=0.3,
+    tts_similarity_boost=0.35,
     opening_line=(
         "안녕하세요. "
         "통합결제안전센터 이준호입니다. "

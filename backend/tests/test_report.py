@@ -97,6 +97,25 @@ def test_heuristic_report_flags():
     assert report.source == "live"
 
 
+def test_assistant_only_transcript_has_no_trainee_behaviors():
+    transcript = (
+        "[상대] 서울OO지방검찰청입니다. 본인 확인을 위해 성함을 말씀하십시오."
+    )
+    report = asyncio.run(
+        score_conversation(
+            transcript,
+            source="live",
+            client=_fake_openai(_llm_payload()),
+        )
+    )
+    assert report.score == 60
+    assert report.suspected is False
+    assert report.gaveName is False
+    assert report.triedHangup is False
+    assert report.riskBehaviors == []
+    assert report.defenseBehaviors == []
+
+
 def test_response_score_applies_behavior_weights_and_clamps():
     score = calculate_response_score(
         [
@@ -155,7 +174,7 @@ def test_score_conversation_uses_llm_and_filters_labels():
     )
     report = asyncio.run(
         score_conversation(
-            "[훈련자] 김민수입니다",
+            "[상대] 성함을 말씀하십시오\n[훈련자] 김민수입니다. 끊겠습니다",
             source="live",
             client=_fake_openai(raw),
         )
@@ -164,6 +183,29 @@ def test_score_conversation_uses_llm_and_filters_labels():
     assert report.gaveName is True
     assert [item.label for item in report.riskBehaviors] == ["개인정보 제공"]
     assert report.source == "live"
+
+
+def test_score_conversation_rejects_assistant_evidence():
+    raw = _llm_payload(
+        riskBehaviors=[
+            {"label": "개인정보 제공", "evidence": "성함을 말씀하십시오"},
+        ],
+        defenseBehaviors=[
+            {"label": "전화 종료(빠른 판단)", "evidence": "끊겠습니다"},
+        ],
+    )
+    report = asyncio.run(
+        score_conversation(
+            "[상대] 성함을 말씀하십시오\n[훈련자] 끊겠습니다",
+            source="live",
+            client=_fake_openai(raw),
+        )
+    )
+    assert report.score == 75
+    assert report.riskBehaviors == []
+    assert [item.label for item in report.defenseBehaviors] == [
+        "전화 종료(빠른 판단)"
+    ]
 
 
 def test_report_prompt_uses_jsonl_rubric(monkeypatch):

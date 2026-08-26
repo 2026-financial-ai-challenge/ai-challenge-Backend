@@ -147,7 +147,12 @@ def test_utterance_assembler_ignores_empty_vad():
 def test_echo_matches_assistant_playback():
     assistant = "안녕하세요. 중앙금융보안센터 고객보호팀 김정훈입니다."
     assert is_echo("안녕하세요", assistant)
+    assert is_echo(
+        "지금은 상황을 넘길 상황이 아닙니다",
+        "지금은 장난처럼 넘길 상황이 아닙니다. 성함을 말씀해 주십시오.",
+    )
     assert not is_echo("왜 안들려", assistant)
+    assert not is_echo("대표번호로 다시 확인하겠습니다", assistant)
 
 
 def test_greeting_playback_covers_opening_line():

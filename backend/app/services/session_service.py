@@ -14,16 +14,23 @@ from app.models.transcript_event import TranscriptEvent
 from app.schemas.consent import ConsentRecord, SessionResponse
 
 
-def create_session(privacy: bool, unannounced_training: bool) -> SessionResponse:
+def create_session(
+    privacy: bool,
+    unannounced_training: bool,
+    participant_id: int | None = None,
+) -> SessionResponse:
     now = datetime.now(timezone.utc)
     with SessionLocal.begin() as db:
         session = TrainingSession(
             id=f"ses_{uuid4().hex}",
             current_training_type="announced",
+            participant_id=participant_id,
+            call_status="waiting" if participant_id is not None else None,
             created_at=now,
             updated_at=now,
         )
         session.consent = Consent(
+            participant_id=participant_id,
             privacy_agreed=privacy,
             surprise_call_agreed=unannounced_training,
             consented_at=now,

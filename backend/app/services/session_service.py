@@ -93,7 +93,7 @@ def get_phone_number(session_id: str) -> str | None:
 
 def update_call_status(
     session_id: str,
-    call_status: Literal["waiting", "calling", "completed"],
+    call_status: Literal["waiting", "calling", "completed", "missed", "failed"],
 ) -> SessionResponse | None:
     with SessionLocal.begin() as db:
         session = db.scalar(_session_query(session_id))

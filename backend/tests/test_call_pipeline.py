@@ -180,3 +180,25 @@ def test_first_hangup_keeps_call_second_ends_it():
     assert not should_hang_up_now(hangup_attempts=1, user_turns=3, max_turns=12)
     assert should_hang_up_now(hangup_attempts=2, user_turns=4, max_turns=12)
     assert should_hang_up_now(hangup_attempts=0, user_turns=12, max_turns=12)
+
+
+def test_trainee_spoke_requires_user_utterance(monkeypatch):
+    from app.services import call_service
+
+    monkeypatch.setattr(
+        call_service,
+        "get_report",
+        lambda _id: SimpleNamespace(
+            turns=[SimpleNamespace(role="assistant", text="안녕하세요")]
+        ),
+    )
+    assert not call_service.trainee_spoke("ses_1")
+
+    monkeypatch.setattr(
+        call_service,
+        "get_report",
+        lambda _id: SimpleNamespace(
+            turns=[SimpleNamespace(role="user", text=" 누구세요  ")]
+        ),
+    )
+    assert call_service.trainee_spoke("ses_1")

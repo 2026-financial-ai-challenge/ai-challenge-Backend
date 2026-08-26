@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from ai.safety import SAFETY_RULES
 from ai.scenarios.types import Scenario
-from ai.voices import THEO
+from ai.voices import Onyu
 
 SCENARIO = Scenario(
     id="loan_offer",
     name="대출권유형",
     max_turns=5,
-    tts_voice_id=THEO,
-    tts_stability=0.42,
-    tts_similarity_boost=0.75,
+    tts_voice_id=Onyu,
+    tts_stability=0.3,
+    tts_similarity_boost=0.35,
     opening_line=(
         "안녕하세요. "
         "가계금리전환상담소 박민수입니다. "

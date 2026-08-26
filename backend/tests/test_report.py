@@ -97,6 +97,25 @@ def test_heuristic_report_flags():
     assert report.source == "live"
 
 
+def test_assistant_only_transcript_has_no_trainee_behaviors():
+    transcript = (
+        "[상대] 서울OO지방검찰청입니다. 본인 확인을 위해 성함을 말씀하십시오."
+    )
+    report = asyncio.run(
+        score_conversation(
+            transcript,
+            source="live",
+            client=_fake_openai(_llm_payload()),
+        )
+    )
+    assert report.score == 60
+    assert report.suspected is False
+    assert report.gaveName is False
+    assert report.triedHangup is False
+    assert report.riskBehaviors == []
+    assert report.defenseBehaviors == []
+
+
 def test_response_score_applies_behavior_weights_and_clamps():
     score = calculate_response_score(
         [
@@ -155,7 +174,7 @@ def test_score_conversation_uses_llm_and_filters_labels():
     )
     report = asyncio.run(
         score_conversation(
-            "[훈련자] 김민수입니다",
+            "[상대] 성함을 말씀하십시오\n[훈련자] 김민수입니다. 끊겠습니다",
             source="live",
             client=_fake_openai(raw),
         )
@@ -164,6 +183,29 @@ def test_score_conversation_uses_llm_and_filters_labels():
     assert report.gaveName is True
     assert [item.label for item in report.riskBehaviors] == ["개인정보 제공"]
     assert report.source == "live"
+
+
+def test_score_conversation_rejects_assistant_evidence():
+    raw = _llm_payload(
+        riskBehaviors=[
+            {"label": "개인정보 제공", "evidence": "성함을 말씀하십시오"},
+        ],
+        defenseBehaviors=[
+            {"label": "전화 종료(빠른 판단)", "evidence": "끊겠습니다"},
+        ],
+    )
+    report = asyncio.run(
+        score_conversation(
+            "[상대] 성함을 말씀하십시오\n[훈련자] 끊겠습니다",
+            source="live",
+            client=_fake_openai(raw),
+        )
+    )
+    assert report.score == 75
+    assert report.riskBehaviors == []
+    assert [item.label for item in report.defenseBehaviors] == [
+        "전화 종료(빠른 판단)"
+    ]
 
 
 def test_report_prompt_uses_jsonl_rubric(monkeypatch):
@@ -237,10 +279,7 @@ def test_draft_then_final_report(monkeypatch):
 
 def test_get_report_api_none_then_draft(monkeypatch):
     client = _client()
-    session_id = client.post(
-        "/v1/consents",
-        json={"privacy": True, "unannouncedTraining": True},
-    ).json()["sessionId"]
+    session_id = _session_id()
 
     empty = client.get(f"/v1/sessions/{session_id}/report")
     assert empty.status_code == 200
@@ -274,10 +313,7 @@ def test_get_report_api_none_then_draft(monkeypatch):
 
 def test_transcript_webhook_builds_final(monkeypatch):
     client = _client()
-    session_id = client.post(
-        "/v1/consents",
-        json={"privacy": True, "unannouncedTraining": True},
-    ).json()["sessionId"]
+    session_id = _session_id()
     bind_call(session_id, "CAhook")
     monkeypatch.delenv("CLAWOPS_WEBHOOK_SIGNING_SECRET", raising=False)
 

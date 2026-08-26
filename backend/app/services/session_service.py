@@ -9,21 +9,29 @@ from app.database import SessionLocal
 from app.models.call import Call
 from app.models.consent import Consent
 from app.models.participant import Participant
+from app.models.phone_verification import PhoneVerification
 from app.models.training_session import TrainingSession
 from app.models.transcript_event import TranscriptEvent
 from app.schemas.consent import ConsentRecord, SessionResponse
 
 
-def create_session(privacy: bool, unannounced_training: bool) -> SessionResponse:
+def create_session(
+    privacy: bool,
+    unannounced_training: bool,
+    participant_id: int | None = None,
+) -> SessionResponse:
     now = datetime.now(timezone.utc)
     with SessionLocal.begin() as db:
         session = TrainingSession(
             id=f"ses_{uuid4().hex}",
             current_training_type="announced",
+            participant_id=participant_id,
+            call_status="waiting" if participant_id is not None else None,
             created_at=now,
             updated_at=now,
         )
         session.consent = Consent(
+            participant_id=participant_id,
             privacy_agreed=privacy,
             surprise_call_agreed=unannounced_training,
             consented_at=now,
@@ -159,6 +167,7 @@ def reset_sessions() -> None:
         db.execute(delete(Call))
         db.execute(delete(Consent))
         db.execute(delete(TrainingSession))
+        db.execute(delete(PhoneVerification))
         db.execute(delete(Participant))
     from app.services.report_service import reset_reports
 

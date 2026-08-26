@@ -11,8 +11,8 @@ class Scenario:
     system_prompt: str
     max_turns: int
     tts_voice_id: str | None = None
-    tts_stability: float = 0.4
-    tts_similarity_boost: float = 0.75
+    tts_stability: float = 0.3
+    tts_similarity_boost: float = 0.35
     subtype: str | None = None
     difficulty: str | None = None
     tactics: tuple[str, ...] = ()

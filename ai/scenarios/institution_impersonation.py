@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from ai.safety import SAFETY_RULES
 from ai.scenarios.types import Scenario
-from ai.voices import THEO
+from ai.voices import Onyu
 
 SCENARIO = Scenario(
     id="institution_impersonation",
     name="기관사칭형",
     max_turns=12,
-    tts_voice_id=THEO,
-    tts_stability=0.52,
-    tts_similarity_boost=0.8,
+    tts_voice_id=Onyu,
+    tts_stability=0.3,
+    tts_similarity_boost=0.35,
     opening_line=(
         "안녕하세요. "
         "중앙금융보안센터 고객보호팀 김정훈입니다. "

@@ -180,12 +180,7 @@ def format_clawops_segments(segments: Any) -> str:
 
 
 def heuristic_report(transcript: str, *, source: Literal["live", "clawops"]) -> TrainingReport:
-    user_text = "\n".join(
-        line.split("]", 1)[-1].strip()
-        for line in (transcript or "").splitlines()
-        if line.startswith("[훈련자]")
-    )
-    blob = user_text or transcript or ""
+    blob = _trainee_text(transcript)
     empty = not blob.strip()
     suspected = bool(_SUSPECT.search(blob))
     gave_name = bool(_NAME_OFFER.search(blob))
@@ -225,7 +220,8 @@ async def score_conversation(
     clawops_summary: dict[str, Any] | None = None,
     client: Any | None = None,
 ) -> TrainingReport:
-    if not (transcript or "").strip():
+    trainee_text = _trainee_text(transcript)
+    if not trainee_text:
         return heuristic_report(transcript, source=source)
 
     try:
@@ -240,8 +236,16 @@ async def score_conversation(
         return heuristic_report(transcript, source=source)
 
     risk_labels, defense_labels = _behavior_labels()
-    risk_behaviors = _keep_known(parsed.riskBehaviors, risk_labels)
-    defense_behaviors = _keep_known(parsed.defenseBehaviors, defense_labels)
+    risk_behaviors = _keep_supported(
+        parsed.riskBehaviors,
+        risk_labels,
+        trainee_text,
+    )
+    defense_behaviors = _keep_supported(
+        parsed.defenseBehaviors,
+        defense_labels,
+        trainee_text,
+    )
     return TrainingReport(
         score=calculate_response_score(risk_behaviors, defense_behaviors),
         suspected=parsed.suspected,
@@ -496,6 +500,38 @@ def _to_camel(name: str) -> str:
 
 def _keep_known(items: list[BehaviorItem], allowed: tuple[str, ...]) -> list[BehaviorItem]:
     return [item for item in items if item.label in allowed and item.evidence.strip()]
+
+
+def _keep_supported(
+    items: list[BehaviorItem],
+    allowed: tuple[str, ...],
+    trainee_text: str,
+) -> list[BehaviorItem]:
+    normalized_trainee = _normalize_evidence(trainee_text)
+    supported: list[BehaviorItem] = []
+    for item in _keep_known(items, allowed):
+        evidence = _normalize_evidence(item.evidence)
+        if evidence and evidence in normalized_trainee:
+            supported.append(item)
+    return supported
+
+
+def _trainee_text(transcript: str) -> str:
+    lines = (transcript or "").splitlines()
+    has_speaker_labels = any(
+        line.startswith("[훈련자]") or line.startswith("[상대]") for line in lines
+    )
+    if not has_speaker_labels:
+        return (transcript or "").strip()
+    return "\n".join(
+        line.split("]", 1)[-1].strip()
+        for line in lines
+        if line.startswith("[훈련자]") and line.split("]", 1)[-1].strip()
+    )
+
+
+def _normalize_evidence(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", text or "").lower()
 
 
 def calculate_response_score(

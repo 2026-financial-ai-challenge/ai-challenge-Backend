@@ -6,7 +6,7 @@ from typing import Any
 
 from ai.safety import SAFETY_RULES
 from ai.scenarios.types import Scenario
-from ai.voices import THEO
+from ai.voices import Onyu
 
 
 DATASET_PATH = Path(__file__).with_name("voice_phishing_training_data.jsonl")
@@ -79,7 +79,7 @@ def _to_scenario(record: dict[str, Any]) -> Scenario:
         opening_line=assistant_messages[0],
         system_prompt=system_prompt,
         max_turns=max_turns,
-        tts_voice_id=THEO,
+        tts_voice_id=Onyu,
         tactics=tactics,
         red_flags=red_flags,
         ideal_trainee_response=ideal_response,

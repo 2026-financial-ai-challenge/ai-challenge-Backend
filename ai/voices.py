@@ -9,3 +9,7 @@ from __future__ import annotations
 
 THEO = "CxErO97xpQgQXYmapDKX"
 YOHAN_KOO = "4JJwo477JUAx3HV0T7n7"
+Kelee_K = "5DWGv3VDkihNUcbvaonB"
+Hanna = "zgDzx5jLLCqEp6Fl7Kl7"
+Onyu = "NaQdbkW5gNZD8wfwXeTV"
+Zara = "jqcCZkN6Knx8BJ5TBdYR"

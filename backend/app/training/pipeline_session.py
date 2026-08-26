@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from difflib import SequenceMatcher
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -30,7 +31,16 @@ def is_echo(user_text: str, assistant_text: str) -> bool:
     assistant = compact_speech(assistant_text)
     if len(user) < 2 or not assistant:
         return False
-    return user in assistant or assistant.startswith(user)
+    if user in assistant or assistant.startswith(user):
+        return True
+    if len(user) < 8:
+        return False
+    segments = [compact_speech(part) for part in _PUNCT.split(assistant_text)]
+    return any(
+        len(segment) >= 8
+        and SequenceMatcher(None, user, segment, autojunk=False).ratio() >= 0.72
+        for segment in segments
+    )
 
 
 def is_garbage_transcript(text: str) -> bool:

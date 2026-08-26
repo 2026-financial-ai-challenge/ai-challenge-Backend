@@ -12,9 +12,7 @@ class PhoneVerification(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     phone_number: Mapped[str] = mapped_column(String(20), index=True)
     code_hash: Mapped[str] = mapped_column(String(64))
-    verification_token_hash: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, unique=True
-    )
+    verification_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

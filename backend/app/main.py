@@ -19,7 +19,10 @@ logging.getLogger("clawops.agent").setLevel(logging.INFO)
 logging.getLogger(__name__).info(
     "Signup SMS: ClawOps (%s) · call AI: PipelineSession (%s)",
     "configured"
-    if all(os.getenv(name) for name in ("CLAWOPS_API_KEY", "CLAWOPS_ACCOUNT_ID", "CLAWOPS_SMS_FROM"))
+    if all(
+        os.getenv(name)
+        for name in ("CLAWOPS_API_KEY", "CLAWOPS_ACCOUNT_ID", "CLAWOPS_SMS_FROM")
+    )
     else "configuration missing",
     os.getenv("CALL_SCENARIO", "scam_001"),
 )

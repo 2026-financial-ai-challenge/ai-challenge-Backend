@@ -3,13 +3,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.auth import (
-    AuthResponse,
-    LoginRequest,
-    RequestSignupOtpRequest,
-    RequestSignupOtpResponse,
-    SignupRequest,
-    VerifySignupOtpRequest,
-    VerifySignupOtpResponse,
+    AuthResponse, LoginRequest, RequestSignupOtpRequest, RequestSignupOtpResponse,
+    SignupRequest, VerifySignupOtpRequest, VerifySignupOtpResponse,
 )
 from app.services.auth_service import login, request_signup_otp, signup, verify_signup_otp
 

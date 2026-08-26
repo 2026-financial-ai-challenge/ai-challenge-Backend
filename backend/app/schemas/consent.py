@@ -22,7 +22,7 @@ class ConsentRecord(BaseModel):
 class SessionResponse(BaseModel):
     id: str
     phoneNumberMasked: str | None
-    callStatus: Literal["waiting", "calling", "completed"] | None
+    callStatus: Literal["waiting", "calling", "completed", "missed", "failed"] | None
     callId: str | None = None
     reportStatus: Literal["none", "pending", "draft", "final", "failed"] | None = None
     currentTrainingType: Literal["announced", "unannounced"]

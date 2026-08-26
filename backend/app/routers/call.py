@@ -1,46 +1,36 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from app.schemas.call import StartCallResponse
-from app.services.call_service import (
-    CallConfigurationError,
-    PhoneNotRegisteredError,
-    SessionNotFoundError,
-    start_outbound_call,
-)
 from app.dependencies.auth import get_owned_training_session
 from app.models.training_session import TrainingSession
+from app.schemas.call import StartCallResponse
+from app.services.call_service import start_training_calls
+from app.services.session_service import get_phone_number
 
 
 router = APIRouter(prefix="/v1/sessions", tags=["Calls"])
 
 
 @router.post("/{session_id}/calls", response_model=StartCallResponse)
-async def start_call(
+def start_call(
     session_id: str,
-    _owned_session: TrainingSession = Depends(get_owned_training_session),
+    owned_session: TrainingSession = Depends(get_owned_training_session),
 ):
-    try:
-        call_id = await start_outbound_call(session_id)
-    except SessionNotFoundError:
+    if owned_session.call_status == "calling":
         return JSONResponse(
-            status_code=404,
-            content={"message": "세션을 찾을 수 없습니다.", "code": "SESSION_NOT_FOUND"},
+            status_code=409,
+            content={
+                "message": "이미 훈련 전화를 걸고 있습니다. 잠시만 기다려 주세요.",
+                "code": "CALL_IN_PROGRESS",
+            },
         )
-    except PhoneNotRegisteredError:
+
+    phone_number = get_phone_number(session_id)
+    if phone_number is None:
         return JSONResponse(
             status_code=409,
             content={"message": "전화번호가 등록되지 않았습니다.", "code": "PHONE_REQUIRED"},
         )
-    except CallConfigurationError as exc:
-        return JSONResponse(
-            status_code=503,
-            content={"message": str(exc), "code": "CALL_SERVICE_NOT_CONFIGURED"},
-        )
-    except Exception:
-        return JSONResponse(
-            status_code=502,
-            content={"message": "전화 발신에 실패했습니다.", "code": "CALL_START_FAILED"},
-        )
 
-    return StartCallResponse(callId=call_id, status="calling")
+    start_training_calls(session_id, phone_number)
+    return StartCallResponse(status="waiting")

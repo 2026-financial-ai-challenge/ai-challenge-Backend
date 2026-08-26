@@ -3,7 +3,7 @@ import inspect
 import logging
 import os
 from datetime import datetime, timezone
-from threading import Thread
+from threading import Lock, Thread
 
 from sqlalchemy import select
 
@@ -12,6 +12,7 @@ from app.models.call import Call
 from app.services.report_service import (
     bind_call,
     build_draft_report,
+    get_report,
     register_transcript_listener,
     request_clawops_transcript,
 )
@@ -21,11 +22,13 @@ from app.services.session_service import (
     get_session,
     mask_phone_number,
     update_call_status,
+    update_report_status,
 )
 from app.training.scenarios import get_call_scenario
 
 
 logger = logging.getLogger(__name__)
+_outbound_lock = Lock()
 
 
 class CallServiceError(Exception):
@@ -42,6 +45,17 @@ class PhoneNotRegisteredError(CallServiceError):
 
 class CallConfigurationError(CallServiceError):
     pass
+
+
+class CallInProgressError(CallServiceError):
+    pass
+
+
+def trainee_spoke(session_id: str) -> bool:
+    return any(
+        turn.role == "user" and turn.text.strip()
+        for turn in get_report(session_id).turns
+    )
 
 
 def _require_env(name: str) -> str:
@@ -203,8 +217,11 @@ async def start_outbound_call(session_id: str) -> str:
 
 
 async def _create_outbound_call(session_id: str):
-    if get_session(session_id) is None:
+    session = get_session(session_id)
+    if session is None:
         raise SessionNotFoundError
+    if session.callStatus == "calling":
+        raise CallInProgressError
 
     phone_number = get_phone_number(session_id)
     if phone_number is None:
@@ -238,9 +255,7 @@ async def _create_outbound_call(session_id: str):
     except TimeoutError:
         await agent.disconnect()
         raise CallConfigurationError(
-            "ClawOps control WebSocket did not connect within 10s. "
-            "Check CLAWOPS_API_KEY, CLAWOPS_ACCOUNT_ID, CLAWOPS_PHONE_NUMBER, "
-            "and that the ClawOps trial/account is still active."
+            "지금은 전화를 걸 수 없습니다. 잠시 후 다시 시도해 주세요."
         ) from None
     except Exception as exc:
         await agent.disconnect()
@@ -248,9 +263,7 @@ async def _create_outbound_call(session_id: str):
         if "Concurrent call limit" in message or "429" in message:
             logger.error("ClawOps outbound rejected: %s", message)
             raise CallConfigurationError(
-                f"{message}. Monthly minutes are not this quota. "
-                "Business is supposed to allow 10 concurrent calls; "
-                "0 means ClawOps has not attached concurrent slots to the account yet."
+                "지금은 통화 연결이 혼잡합니다. 잠시 후 다시 시도해 주세요."
             ) from None
         raise
 
@@ -262,33 +275,41 @@ async def _create_outbound_call(session_id: str):
 async def _monitor_call(session_id: str, agent, call_session) -> None:
     try:
         await call_session.wait()
-        update_call_status(session_id, "completed")
-        _complete_call(call_session.call_id)
+        if trainee_spoke(session_id):
+            update_call_status(session_id, "completed")
+            _complete_call(call_session.call_id)
+            try:
+                await asyncio.wait_for(build_draft_report(session_id), timeout=20)
+            except Exception:
+                logger.exception("Draft report failed: session_id=%s", session_id)
+            try:
+                await request_clawops_transcript(call_session.call_id)
+            except Exception:
+                logger.exception(
+                    "ClawOps transcript request failed: session_id=%s",
+                    session_id,
+                )
+        else:
+            update_call_status(session_id, "missed")
+            _fail_call(call_session.call_id, "no_answer")
+            update_report_status(session_id, "none")
+            logger.info("Training call missed session=%s", session_id)
     except Exception:
-        update_call_status(session_id, "waiting")
+        update_call_status(session_id, "failed")
         _fail_call(call_session.call_id, "ClawOps call failed")
         logger.exception("ClawOps call failed: session_id=%s", session_id)
     finally:
-        try:
-            await asyncio.wait_for(build_draft_report(session_id), timeout=20)
-        except Exception:
-            logger.exception("Draft report failed: session_id=%s", session_id)
-        try:
-            await request_clawops_transcript(call_session.call_id)
-        except Exception:
-            logger.exception(
-                "ClawOps transcript request failed: session_id=%s", session_id
-            )
         await agent.disconnect()
 
 
 def start_training_calls(session_id: str, phone_number: str) -> None:
-    """발신은 SMS 점유 인증이 끝난 뒤에만 호출한다."""
+    """발신은 백그라운드에서 진행한다. HTTP 요청을 ClawOps 연결에 묶지 않는다."""
     logger.info(
         "Starting training calls session=%s phone=%s",
         session_id,
         mask_phone_number(phone_number),
     )
+    update_call_status(session_id, "waiting")
     Thread(
         target=_run_training_call,
         args=(session_id,),
@@ -297,11 +318,19 @@ def start_training_calls(session_id: str, phone_number: str) -> None:
 
 
 def _run_training_call(session_id: str) -> None:
+    if not _outbound_lock.acquire(timeout=20):
+        update_call_status(session_id, "failed")
+        logger.warning(
+            "Previous ClawOps agent still running; skip session=%s", session_id
+        )
+        return
     try:
         asyncio.run(_start_and_monitor_call(session_id))
     except Exception:
-        update_call_status(session_id, "waiting")
+        update_call_status(session_id, "failed")
         logger.exception("Failed to start ClawOps call: session_id=%s", session_id)
+    finally:
+        _outbound_lock.release()
 
 
 async def _start_and_monitor_call(session_id: str) -> None:

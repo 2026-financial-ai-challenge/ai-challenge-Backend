@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -10,6 +10,9 @@ class TrainingReportRecord(Base):
     __tablename__ = "training_reports"
     __table_args__ = (
         UniqueConstraint("session_id", "source", name="uq_report_session_source"),
+        CheckConstraint("status IN ('pending', 'draft', 'final', 'failed')", name="ck_report_status"),
+        CheckConstraint("source IN ('live', 'clawops')", name="ck_report_source"),
+        CheckConstraint("score BETWEEN 0 AND 100", name="ck_report_score"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

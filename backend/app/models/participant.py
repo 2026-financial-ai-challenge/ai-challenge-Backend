@@ -11,7 +11,6 @@ class Participant(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     phone_number: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    phone_number_masked: Mapped[str] = mapped_column(String(20))
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -28,4 +27,3 @@ class Participant(Base):
     sessions: Mapped[list["TrainingSession"]] = relationship(
         back_populates="participant"
     )
-    consents: Mapped[list["Consent"]] = relationship(back_populates="participant")

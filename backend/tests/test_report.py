@@ -1,10 +1,13 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.database import SessionLocal
+from app.models.participant import Participant
 from app.schemas.report import BehaviorItem, TrainingReport, TranscriptTurn
 from app.services import report_service
 from app.services.report_service import (
@@ -22,6 +25,7 @@ from app.services.report_service import (
     _scenario_report_note,
 )
 from app.services.session_service import create_session, reset_sessions
+from app.services.auth_service import create_access_token, hash_password
 
 
 def setup_function() -> None:
@@ -34,6 +38,26 @@ def _client() -> TestClient:
 
 def _session_id() -> str:
     return create_session(privacy=True, unannounced_training=True).id
+
+
+def _authenticated_session() -> tuple[str, dict[str, str]]:
+    with SessionLocal.begin() as db:
+        participant = Participant(
+            phone_number="01099998888",
+            password_hash=hash_password("testPassword1"),
+            phone_verified_at=datetime.now(timezone.utc),
+        )
+        db.add(participant)
+        db.flush()
+        participant_id = participant.id
+    session_id = create_session(
+        privacy=True,
+        unannounced_training=True,
+        participant_id=participant_id,
+    ).id
+    return session_id, {
+        "Authorization": f"Bearer {create_access_token(participant_id)}"
+    }
 
 
 def _llm_payload(**overrides) -> str:
@@ -279,13 +303,13 @@ def test_draft_then_final_report(monkeypatch):
 
 def test_get_report_api_none_then_draft(monkeypatch):
     client = _client()
-    session_id = _session_id()
+    session_id, headers = _authenticated_session()
 
-    empty = client.get(f"/v1/sessions/{session_id}/report")
+    empty = client.get(f"/v1/sessions/{session_id}/report", headers=headers)
     assert empty.status_code == 200
     assert empty.json()["status"] == "none"
 
-    missing = client.get("/v1/sessions/ses_missing/report")
+    missing = client.get("/v1/sessions/ses_missing/report", headers=headers)
     assert missing.status_code == 404
 
     bind_call(session_id, "CAapi")
@@ -303,17 +327,17 @@ def test_get_report_api_none_then_draft(monkeypatch):
 
     monkeypatch.setattr(report_service, "score_conversation", fake_score)
     asyncio.run(build_draft_report(session_id))
-    body = client.get(f"/v1/sessions/{session_id}/report").json()
+    body = client.get(f"/v1/sessions/{session_id}/report", headers=headers).json()
     assert body["status"] == "draft"
     assert body["draft"]["suspected"] is True
-    session = client.get(f"/v1/sessions/{session_id}").json()["session"]
+    session = client.get(f"/v1/sessions/{session_id}", headers=headers).json()["session"]
     assert session["callId"] == "CAapi"
     assert session["reportStatus"] == "draft"
 
 
 def test_transcript_webhook_builds_final(monkeypatch):
     client = _client()
-    session_id = _session_id()
+    session_id, headers = _authenticated_session()
     bind_call(session_id, "CAhook")
     monkeypatch.delenv("CLAWOPS_WEBHOOK_SIGNING_SECRET", raising=False)
 
@@ -357,7 +381,7 @@ def test_transcript_webhook_builds_final(monkeypatch):
         },
     )
     assert response.status_code == 204
-    body = client.get(f"/v1/sessions/{session_id}/report").json()
+    body = client.get(f"/v1/sessions/{session_id}/report", headers=headers).json()
     assert body["status"] == "final"
     assert body["final"]["source"] == "clawops"
 

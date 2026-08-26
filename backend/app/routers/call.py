@@ -1,23 +1,22 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
+from app.dependencies.auth import get_owned_training_session
+from app.models.training_session import TrainingSession
 from app.schemas.call import StartCallResponse
 from app.services.call_service import start_training_calls
-from app.services.session_service import get_phone_number, get_session
+from app.services.session_service import get_phone_number
 
 
 router = APIRouter(prefix="/v1/sessions", tags=["Calls"])
 
 
 @router.post("/{session_id}/calls", response_model=StartCallResponse)
-def start_call(session_id: str):
-    session = get_session(session_id)
-    if session is None:
-        return JSONResponse(
-            status_code=404,
-            content={"message": "세션을 찾을 수 없습니다.", "code": "SESSION_NOT_FOUND"},
-        )
-    if session.callStatus == "calling":
+def start_call(
+    session_id: str,
+    owned_session: TrainingSession = Depends(get_owned_training_session),
+):
+    if owned_session.call_status == "calling":
         return JSONResponse(
             status_code=409,
             content={

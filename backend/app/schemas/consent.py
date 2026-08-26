@@ -19,23 +19,6 @@ class ConsentRecord(BaseModel):
     consentedAt: datetime
 
 
-class RequestOtpRequest(BaseModel):
-    phoneNumber: str
-
-
-class RequestOtpResponse(BaseModel):
-    phoneNumberMasked: str
-    code: str
-    sendToNumber: str
-    expiresInSec: int
-    resendAvailableInSec: int
-
-
-class VerifyOtpRequest(BaseModel):
-    phoneNumber: str
-    code: str
-
-
 class SessionResponse(BaseModel):
     id: str
     phoneNumberMasked: str | None

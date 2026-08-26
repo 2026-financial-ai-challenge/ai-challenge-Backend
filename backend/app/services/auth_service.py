@@ -108,7 +108,7 @@ def signup(db: Session, verification_token: str, password: str) -> AuthResponse:
     if participant is not None and participant.password_hash is not None:
         raise ApiError(409, "PHONE_ALREADY_REGISTERED", "이미 가입된 전화번호입니다.")
     if participant is None:
-        participant = Participant(phone_number=challenge.phone_number, phone_number_masked=mask_phone_number(challenge.phone_number))
+        participant = Participant(phone_number=challenge.phone_number)
         db.add(participant)
     participant.password_hash = hash_password(password)
     participant.phone_verified_at = now
@@ -166,7 +166,10 @@ def decode_access_token(token: str) -> int:
 
 def _auth_response(participant: Participant) -> AuthResponse:
     return AuthResponse(accessToken=create_access_token(participant.id), expiresInSec=ACCESS_TOKEN_TTL_SEC,
-        participant=AuthParticipant(id=participant.id, phoneNumberMasked=participant.phone_number_masked))
+        participant=AuthParticipant(
+            id=participant.id,
+            phoneNumberMasked=mask_phone_number(participant.phone_number),
+        ))
 
 
 def _validate_password(password: str) -> None:

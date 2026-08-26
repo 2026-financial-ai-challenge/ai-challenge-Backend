@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
 from app.schemas.call import StartCallResponse
@@ -8,13 +8,18 @@ from app.services.call_service import (
     SessionNotFoundError,
     start_outbound_call,
 )
+from app.dependencies.auth import get_owned_training_session
+from app.models.training_session import TrainingSession
 
 
 router = APIRouter(prefix="/v1/sessions", tags=["Calls"])
 
 
 @router.post("/{session_id}/calls", response_model=StartCallResponse)
-async def start_call(session_id: str):
+async def start_call(
+    session_id: str,
+    _owned_session: TrainingSession = Depends(get_owned_training_session),
+):
     try:
         call_id = await start_outbound_call(session_id)
     except SessionNotFoundError:

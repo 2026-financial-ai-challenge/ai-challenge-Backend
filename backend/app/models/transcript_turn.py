@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -10,6 +10,8 @@ class TranscriptTurnRecord(Base):
     __tablename__ = "transcript_turns"
     __table_args__ = (
         UniqueConstraint("session_id", "source", "sequence", name="uq_turn_sequence"),
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_turn_role"),
+        CheckConstraint("source IN ('live', 'clawops')", name="ck_turn_source"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

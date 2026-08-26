@@ -31,7 +31,6 @@ def create_session(
             updated_at=now,
         )
         session.consent = Consent(
-            participant_id=participant_id,
             privacy_agreed=privacy,
             surprise_call_agreed=unannounced_training,
             consented_at=now,
@@ -50,36 +49,6 @@ def get_session(session_id: str) -> SessionResponse | None:
 def session_exists(session_id: str) -> bool:
     with SessionLocal() as db:
         return db.get(TrainingSession, session_id) is not None
-
-
-def confirm_verified_phone(session_id: str, phone_number: str) -> SessionResponse | None:
-    masked = mask_phone_number(phone_number)
-    now = datetime.now(timezone.utc)
-    with SessionLocal.begin() as db:
-        session = db.scalar(_session_query(session_id))
-        if session is None:
-            return None
-
-        participant = db.scalar(
-            select(Participant).where(Participant.phone_number == phone_number)
-        )
-        if participant is None:
-            participant = Participant(
-                phone_number=phone_number,
-                phone_number_masked=masked,
-            )
-            db.add(participant)
-            db.flush()
-        else:
-            participant.phone_number_masked = masked
-            participant.updated_at = now
-
-        session.participant = participant
-        session.call_status = "waiting"
-        session.updated_at = now
-        session.consent.participant = participant
-        db.flush()
-        return _to_response(session)
 
 
 def get_phone_number(session_id: str) -> str | None:
@@ -192,7 +161,7 @@ def _to_response(session: TrainingSession) -> SessionResponse:
     return SessionResponse(
         id=session.id,
         phoneNumberMasked=(
-            session.participant.phone_number_masked
+            mask_phone_number(session.participant.phone_number)
             if session.participant is not None
             else None
         ),

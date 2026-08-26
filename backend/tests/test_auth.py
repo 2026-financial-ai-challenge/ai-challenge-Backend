@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from app.database import SessionLocal
 from app.main import app
 from app.models.phone_verification import PhoneVerification
+from app.models.participant import Participant
 from app.services import auth_service
 from app.services.session_service import reset_sessions
 
@@ -123,3 +124,33 @@ def test_sms_failure_does_not_persist_challenge(client, monkeypatch):
     with SessionLocal() as db:
         count = db.scalar(select(func.count()).select_from(PhoneVerification))
     assert count == 0
+
+
+def test_session_resources_are_owner_only(client, monkeypatch):
+    http, sent = client
+    from app.routers import consent
+    monkeypatch.setattr(consent, "start_training_calls", lambda *_args: None)
+    token = _verify(http, sent)
+    signup = http.post(
+        "/v1/auth/signup",
+        json={"verificationToken": token, "password": PASSWORD},
+    ).json()
+    owner_token = signup["accessToken"]
+    session_id = http.post(
+        "/v1/consents",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"privacy": True, "unannouncedTraining": True},
+    ).json()["sessionId"]
+
+    with SessionLocal.begin() as db:
+        stranger = Participant(
+            phone_number="01077776666",
+            password_hash=auth_service.hash_password(PASSWORD),
+        )
+        db.add(stranger)
+        db.flush()
+        stranger_token = auth_service.create_access_token(stranger.id)
+
+    headers = {"Authorization": f"Bearer {stranger_token}"}
+    assert http.get(f"/v1/sessions/{session_id}", headers=headers).status_code == 404
+    assert http.get(f"/v1/sessions/{session_id}/report", headers=headers).status_code == 404

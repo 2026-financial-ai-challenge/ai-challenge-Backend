@@ -1,17 +1,20 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from app.schemas.consent import (
-    GetSessionResponse,
-)
+from app.schemas.consent import GetSessionResponse
 from app.services.session_service import get_session
+from app.dependencies.auth import get_owned_training_session
+from app.models.training_session import TrainingSession
 
 
 router = APIRouter(prefix="/v1/sessions", tags=["Sessions"])
 
 
 @router.get("/{session_id}", response_model=GetSessionResponse)
-def get_session_by_id(session_id: str):
+def get_session_by_id(
+    session_id: str,
+    _owned_session: TrainingSession = Depends(get_owned_training_session),
+):
     session = get_session(session_id)
     if session is None:
         return JSONResponse(

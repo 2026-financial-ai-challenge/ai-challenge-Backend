@@ -16,14 +16,8 @@ class Consent(Base):
         unique=True,
         index=True,
     )
-    participant_id: Mapped[int | None] = mapped_column(
-        ForeignKey("participants.id", ondelete="SET NULL"), nullable=True
-    )
     privacy_agreed: Mapped[bool] = mapped_column(Boolean)
     surprise_call_agreed: Mapped[bool] = mapped_column(Boolean)
     consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     session: Mapped["TrainingSession"] = relationship(back_populates="consent")
-    participant: Mapped["Participant | None"] = relationship(
-        back_populates="consents"
-    )

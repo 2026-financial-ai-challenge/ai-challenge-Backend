@@ -24,15 +24,16 @@ def ensure_ai_importable() -> Path:
 
 def get_call_scenario():
     ensure_ai_importable()
-    from ai.scenarios import SCENARIOS, get_scenario
+    from ai.scenarios import get_scenario
 
-    scenario_id = os.getenv("CALL_SCENARIO", "scam_001").strip()
-    if not scenario_id:
-        scenario_id = "scam_001"
-    try:
-        return get_scenario(scenario_id)
-    except KeyError as exc:
-        known = ", ".join(SCENARIOS)
-        raise RuntimeError(
-            f"Unknown CALL_SCENARIO '{scenario_id}'. Expected one of: {known}"
-        ) from exc
+    return get_scenario(os.getenv("CALL_SCENARIO", "voice_phishing_training"))
+
+
+async def get_runtime_scenario():
+    """Return a per-call generated scenario when dynamic mode is enabled."""
+    base = get_call_scenario()
+    from ai.scenarios.generator import dynamic_scenarios_enabled, generate_scenario
+
+    if not dynamic_scenarios_enabled():
+        return base
+    return await generate_scenario(base)

@@ -1,25 +1,18 @@
 from __future__ import annotations
 
-from ai.scenarios.card_payment_fraud import SCENARIO as CARD_PAYMENT_FRAUD
-from ai.scenarios.institution_impersonation import SCENARIO as INSTITUTION_IMPERSONATION
-from ai.scenarios.jsonl_loader import load_jsonl_scenarios
-from ai.scenarios.loan_offer import SCENARIO as LOAN_OFFER
 from ai.scenarios.types import Scenario
 
-SCENARIOS: dict[str, Scenario] = {
-    INSTITUTION_IMPERSONATION.id: INSTITUTION_IMPERSONATION,
-    CARD_PAYMENT_FRAUD.id: CARD_PAYMENT_FRAUD,
-    LOAN_OFFER.id: LOAN_OFFER,
-}
-SCENARIOS.update(load_jsonl_scenarios())
+SCENARIOS: dict[str, Scenario] = {}
 
 
 def get_scenario(scenario_id: str) -> Scenario:
-    try:
-        return SCENARIOS[scenario_id]
-    except KeyError as exc:
-        known = ", ".join(SCENARIOS)
-        raise KeyError(f"Unknown scenario '{scenario_id}'. Expected one of: {known}") from exc
+    return Scenario(
+        id="dynamic_seed",
+        name=scenario_id.strip() or "voice_phishing_training",
+        opening_line="안녕하세요. 확인할 거래 건으로 연락드렸습니다.",
+        system_prompt="동적 시나리오 생성을 위한 기본 시드입니다.",
+        max_turns=8,
+    )
 
 
 __all__ = ["SCENARIOS", "Scenario", "get_scenario"]

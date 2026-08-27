@@ -14,36 +14,18 @@ from app.training.pipeline_session import (
 from app.training.scenarios import ensure_ai_importable, get_call_scenario
 
 
-def test_default_call_scenario_uses_jsonl_dataset(monkeypatch):
+def test_default_call_scenario_uses_dynamic_seed(monkeypatch):
     monkeypatch.delenv("CALL_SCENARIO", raising=False)
     scenario = get_call_scenario()
-    assert scenario.id == "scam_001"
-    assert "김민석" in scenario.opening_line
+    assert scenario.id == "dynamic_seed"
+    assert scenario.name == "voice_phishing_training"
     assert scenario.max_turns == 8
-    assert scenario.tactics == ("권위 사칭", "공포 유발", "긴급성 조성")
-    assert "안전계좌" in scenario.system_prompt
-    assert scenario.red_flags
-    assert "112/1332" in scenario.ideal_trainee_response
-
-
-def test_jsonl_dataset_registers_all_scenarios():
-    ensure_ai_importable()
-    from ai.scenarios import SCENARIOS
-
-    for index in range(1, 11):
-        assert f"scam_{index:03d}" in SCENARIOS
 
 
 def test_call_scenario_env_override(monkeypatch):
-    monkeypatch.setenv("CALL_SCENARIO", "loan_offer")
+    monkeypatch.setenv("CALL_SCENARIO", "custom_training_type")
     scenario = get_call_scenario()
-    assert scenario.id == "loan_offer"
-
-
-def test_unknown_call_scenario(monkeypatch):
-    monkeypatch.setenv("CALL_SCENARIO", "not-a-scenario")
-    with pytest.raises(RuntimeError, match="Unknown CALL_SCENARIO"):
-        get_call_scenario()
+    assert scenario.name == "custom_training_type"
 
 
 def test_phone_prompt_includes_opening_and_forbids_transfer():

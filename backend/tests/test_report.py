@@ -233,7 +233,7 @@ def test_score_conversation_rejects_assistant_evidence():
 
 
 def test_report_prompt_uses_jsonl_rubric(monkeypatch):
-    monkeypatch.setenv("CALL_SCENARIO", "scam_001")
+    monkeypatch.setenv("CALL_SCENARIO", "voice_phishing_training")
     note = _scenario_report_note()
     assert "권위 사칭" in note
     assert "알아챘어야 할 위험 신호" in note

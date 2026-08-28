@@ -219,6 +219,7 @@ async def score_conversation(
     source: Literal["live", "clawops"],
     clawops_summary: dict[str, Any] | None = None,
     client: Any | None = None,
+    scenario: Any | None = None,
 ) -> TrainingReport:
     trainee_text = _trainee_text(transcript)
     if not trainee_text:
@@ -230,6 +231,7 @@ async def score_conversation(
             source=source,
             clawops_summary=clawops_summary,
             client=client,
+            scenario=scenario,
         )
     except Exception:
         logger.exception("Training report LLM failed; using heuristic")
@@ -260,10 +262,17 @@ async def score_conversation(
     )
 
 
-async def build_draft_report(session_id: str, *, client: Any | None = None) -> TrainingReport:
+async def build_draft_report(
+    session_id: str,
+    *,
+    client: Any | None = None,
+    scenario: Any | None = None,
+) -> TrainingReport:
     turns = get_report(session_id).turns
     transcript = format_live_turns(turns)
-    report = await score_conversation(transcript, source="live", client=client)
+    report = await score_conversation(
+        transcript, source="live", client=client, scenario=scenario
+    )
     _save_report(session_id, report, status="draft")
     status: ReportStatus = "final" if get_report(session_id).final is not None else "draft"
     update_report_status(session_id, status)
@@ -571,6 +580,7 @@ async def _ask_report_llm(
     source: Literal["live", "clawops"],
     clawops_summary: dict[str, Any] | None,
     client: Any | None,
+    scenario: Any | None,
 ) -> _LlmReport:
     from openai import AsyncOpenAI
 
@@ -587,7 +597,7 @@ async def _ask_report_llm(
             "\n\nClawOps 일반 요약(초안, 교육 루브릭 아님):\n"
             + json.dumps(clawops_summary, ensure_ascii=False)
         )
-    scenario_note = _scenario_report_note()
+    scenario_note = _scenario_report_note(scenario)
     system = f"""
 너는 보이스피싱 모의훈련 코치다. 이 대화는 사전 동의 하의 교육 시뮬레이션이다.
 실제 금감원·검찰·은행 전화가 아니다. 점수나 등급은 매기지 마라.
@@ -635,9 +645,9 @@ async def _ask_report_llm(
         raise RuntimeError(f"Report LLM returned invalid JSON: {raw[:500]}") from exc
 
 
-def _scenario_report_note() -> str:
+def _scenario_report_note(scenario: Any | None = None) -> str:
     try:
-        scenario = get_call_scenario()
+        scenario = scenario or get_call_scenario()
     except Exception:
         logger.exception("Could not load scenario rubric for report")
         return ""

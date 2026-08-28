@@ -2,12 +2,12 @@
 
 Typed mode (default):
 
-    python -m ai.test_latency --scenario institution_impersonation
+    python -m ai.test_latency --scenario voice_phishing_training
 
 Mic mode (streaming STT → LLM → TTS):
 
     python -m ai.test_stt
-    python -m ai.test_latency --mic --scenario institution_impersonation
+    python -m ai.test_latency --mic --scenario voice_phishing_training
 
 Target after the user finishes speaking: first TTS audio byte < 1000 ms.
 """
@@ -39,7 +39,8 @@ from ai.conversation_pipeline import (
     run_turn,
     speak_text,
 )
-from ai.scenarios import SCENARIOS, get_scenario
+from ai.scenarios import get_scenario
+from ai.scenarios.generator import dynamic_scenarios_enabled, generate_scenario
 
 _ECHO_TAIL_SECONDS = 0.25
 
@@ -50,8 +51,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenario",
-        default="institution_impersonation",
-        choices=sorted(SCENARIOS),
+        default="voice_phishing_training",
         help="Scenario id to run",
     )
     parser.add_argument(
@@ -104,6 +104,8 @@ def _print_partial(text: str) -> None:
 
 async def _async_main(args: argparse.Namespace) -> int:
     scenario = get_scenario(args.scenario)
+    if dynamic_scenarios_enabled():
+        scenario = await generate_scenario(scenario)
     sink = _make_sink(args.no_play)
     history: list[ChatMessage] = [
         {"role": "assistant", "content": scenario.opening_line},

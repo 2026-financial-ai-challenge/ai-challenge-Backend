@@ -13,9 +13,8 @@ ai/test_latency.py
 ai/test_stt.py
 ai/tts_stream.py
 ai/scenarios/__init__.py
-ai/scenarios/card_payment_fraud.py
-ai/scenarios/institution_impersonation.py
-ai/scenarios/loan_offer.py
+ai/scenarios/generator.py
+ai/scenarios/scenario_generation_guidelines.md
 ai/scenarios/types.py
 safety_phishing_call_ai.egg-info/PKG-INFO
 safety_phishing_call_ai.egg-info/SOURCES.txt

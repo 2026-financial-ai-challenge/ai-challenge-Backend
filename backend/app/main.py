@@ -24,7 +24,7 @@ logging.getLogger(__name__).info(
         for name in ("CLAWOPS_API_KEY", "CLAWOPS_ACCOUNT_ID", "CLAWOPS_SMS_FROM")
     )
     else "configuration missing",
-    os.getenv("CALL_SCENARIO", "scam_001"),
+    os.getenv("CALL_SCENARIO", "voice_phishing_training"),
 )
 
 

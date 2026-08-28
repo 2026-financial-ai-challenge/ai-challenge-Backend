@@ -24,7 +24,7 @@ from app.services.session_service import (
     update_call_status,
     update_report_status,
 )
-from app.training.scenarios import get_call_scenario
+from app.training.scenarios import get_runtime_scenario
 
 
 logger = logging.getLogger(__name__)
@@ -211,8 +211,8 @@ def _make_realtime_agent(from_number: str, scenario):
 
 
 async def start_outbound_call(session_id: str) -> str:
-    agent, call_session = await _create_outbound_call(session_id)
-    asyncio.create_task(_monitor_call(session_id, agent, call_session))
+    agent, call_session, scenario = await _create_outbound_call(session_id)
+    asyncio.create_task(_monitor_call(session_id, agent, call_session, scenario))
     return call_session.call_id
 
 
@@ -233,9 +233,15 @@ async def _create_outbound_call(session_id: str):
     _require_env("OPENAI_API_KEY")
 
     try:
-        scenario = get_call_scenario()
+        scenario = await get_runtime_scenario()
     except Exception as exc:
-        raise CallConfigurationError(str(exc)) from exc
+        logger.exception("Dynamic scenario generation failed; using base scenario")
+        try:
+            from app.training.scenarios import get_call_scenario
+
+            scenario = get_call_scenario()
+        except Exception as fallback_exc:
+            raise CallConfigurationError(str(fallback_exc)) from fallback_exc
 
     logger.info(
         "Starting pipeline call session=%s scenario=%s",
@@ -269,17 +275,19 @@ async def _create_outbound_call(session_id: str):
 
     bind_call(session_id, call_session.call_id)
     attach_call(session_id, call_session.call_id)
-    return agent, call_session
+    return agent, call_session, scenario
 
 
-async def _monitor_call(session_id: str, agent, call_session) -> None:
+async def _monitor_call(session_id: str, agent, call_session, scenario=None) -> None:
     try:
         await call_session.wait()
         if trainee_spoke(session_id):
             update_call_status(session_id, "completed")
             _complete_call(call_session.call_id)
             try:
-                await asyncio.wait_for(build_draft_report(session_id), timeout=20)
+                await asyncio.wait_for(
+                    build_draft_report(session_id, scenario=scenario), timeout=20
+                )
             except Exception:
                 logger.exception("Draft report failed: session_id=%s", session_id)
             try:
@@ -334,8 +342,8 @@ def _run_training_call(session_id: str) -> None:
 
 
 async def _start_and_monitor_call(session_id: str) -> None:
-    agent, call_session = await _create_outbound_call(session_id)
-    await _monitor_call(session_id, agent, call_session)
+    agent, call_session, scenario = await _create_outbound_call(session_id)
+    await _monitor_call(session_id, agent, call_session, scenario)
 
 
 def _complete_call(clawops_call_id: str) -> None:

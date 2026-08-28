@@ -13,7 +13,8 @@ from app.routers import auth, call, consent, report, session, webhook
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _REPO_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(_BACKEND_DIR / ".env", override=True)
-load_dotenv(_REPO_DIR / "ai" / ".env", override=False)
+for _ai_env in (_REPO_DIR / "ai" / ".env", Path("/packages/ai/.env")):
+    load_dotenv(_ai_env, override=False)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
 logging.getLogger("clawops.agent").setLevel(logging.INFO)
 logging.getLogger(__name__).info(

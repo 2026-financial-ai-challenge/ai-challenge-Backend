@@ -233,8 +233,12 @@ def test_score_conversation_rejects_assistant_evidence():
 
 
 def test_report_prompt_uses_jsonl_rubric(monkeypatch):
-    monkeypatch.setenv("CALL_SCENARIO", "voice_phishing_training")
-    note = _scenario_report_note()
+    scenario = SimpleNamespace(
+        tactics=("권위 사칭",),
+        red_flags=("기관이 전화로 송금을 요구함",),
+        ideal_trainee_response="전화를 끊고 112/1332로 확인한다.",
+    )
+    note = _scenario_report_note(scenario)
     assert "권위 사칭" in note
     assert "알아챘어야 할 위험 신호" in note
     assert "112/1332" in note
@@ -315,7 +319,9 @@ def test_get_report_api_none_then_draft(monkeypatch):
     bind_call(session_id, "CAapi")
     append_turn(session_id, "user", "누구세요")
 
-    async def fake_score(transcript, *, source, clawops_summary=None, client=None):
+    async def fake_score(
+        transcript, *, source, clawops_summary=None, client=None, scenario=None
+    ):
         return TrainingReport(
             suspected=True,
             gaveName=False,

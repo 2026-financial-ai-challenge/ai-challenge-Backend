@@ -229,7 +229,7 @@ async def _create_outbound_call(session_id: str):
 
     _require_env("CLAWOPS_API_KEY")
     _require_env("CLAWOPS_ACCOUNT_ID")
-    from_number = _require_env("CLAWOPS_PHONE_NUMBER")
+    from_number = _outbound_phone_number(session.currentTrainingType)
     _require_env("OPENAI_API_KEY")
 
     try:
@@ -290,6 +290,18 @@ async def _monitor_call(session_id: str, agent, call_session, scenario=None) -> 
                 )
             except Exception:
                 logger.exception("Draft report failed: session_id=%s", session_id)
+            else:
+                try:
+                    from app.services.training_scheduler import (
+                        schedule_unannounced_training,
+                    )
+
+                    schedule_unannounced_training(session_id)
+                except Exception:
+                    logger.exception(
+                        "Unannounced training scheduling failed: session_id=%s",
+                        session_id,
+                    )
             try:
                 await request_clawops_transcript(call_session.call_id)
             except Exception:
@@ -365,3 +377,9 @@ def _fail_call(clawops_call_id: str, reason: str) -> None:
             call.status = "failed"
             call.failure_reason = reason
             call.completed_at = datetime.now(timezone.utc)
+
+
+def _outbound_phone_number(training_type: str) -> str:
+    if training_type == "unannounced":
+        return _require_env("CLAWOPS_UNANNOUNCED_PHONE_NUMBER")
+    return _require_env("CLAWOPS_PHONE_NUMBER")

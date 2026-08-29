@@ -14,18 +14,21 @@ from app.training.pipeline_session import (
 from app.training.scenarios import ensure_ai_importable, get_call_scenario
 
 
-def test_default_call_scenario_uses_dynamic_seed(monkeypatch):
+def test_default_call_scenario_uses_training_fallback(monkeypatch):
     monkeypatch.delenv("CALL_SCENARIO", raising=False)
     scenario = get_call_scenario()
-    assert scenario.id == "dynamic_seed"
-    assert scenario.name == "voice_phishing_training"
+    assert scenario.id == "voice_phishing_training"
     assert scenario.max_turns == 8
+    assert scenario.tts_voice_id
+    assert "권위 사칭" in scenario.tactics
+    assert "112/1332" in (scenario.ideal_trainee_response or "")
+    assert "동적 시나리오 생성을 위한 기본 시드" not in scenario.system_prompt
 
 
 def test_call_scenario_env_override(monkeypatch):
     monkeypatch.setenv("CALL_SCENARIO", "custom_training_type")
     scenario = get_call_scenario()
-    assert scenario.name == "custom_training_type"
+    assert scenario.id == "custom_training_type"
 
 
 def test_phone_prompt_includes_opening_and_forbids_transfer():

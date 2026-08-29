@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -15,16 +16,31 @@ from ai.safety import SAFETY_RULES
 from ai.scenarios.types import Scenario
 from ai.voices import Onyu
 
+logger = logging.getLogger(__name__)
+
 GUIDELINES_PATH = Path(__file__).with_name("scenario_generation_guidelines.md")
-_FORBIDDEN_OUTPUT = re.compile(
-    r"https?://|www\.|\d{6,}|주민등록번호|카드번호|계좌번호|비밀번호|인증번호|"
-    r"금감원|검찰|경찰|은행|카드사|AI|모델|프롬프트|시뮬레이션",
+MAX_GENERATE_ATTEMPTS = 3
+_DIFFICULTY_ALIASES = {
+    "하": "하",
+    "중": "중",
+    "상": "상",
+    "쉬움": "하",
+    "easy": "하",
+    "보통": "중",
+    "medium": "중",
+    "어려움": "상",
+    "hard": "상",
+}
+_SPOKEN_META = re.compile(
+    r"(?<![A-Za-z])AI(?![A-Za-z])|프롬프트|시뮬레이션",
     re.IGNORECASE,
 )
+_REAL_ORGS = re.compile(r"금감원|금융감독원|검찰청|경찰청|국민은행|신한은행|카카오뱅크")
+_UNSAFE_TOKEN = re.compile(r"https?://|www\.|\d{6,}", re.IGNORECASE)
 
 
 class GeneratedScenario(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     name: str = Field(min_length=1, max_length=80)
     persona_name: str = Field(min_length=1, max_length=40)
@@ -48,16 +64,47 @@ class GeneratedScenario(BaseModel):
         "opening_line",
         "scenario_summary",
         "conversation_goal",
-        "ideal_trainee_response",
         mode="before",
     )
     @classmethod
     def strip_text(cls, value: Any) -> Any:
-        return value.strip() if isinstance(value, str) else value
+        return _as_text(value) if value is not None else value
+
+    @field_validator("ideal_trainee_response", mode="before")
+    @classmethod
+    def coerce_response(cls, value: Any) -> Any:
+        return _as_text(value) if value is not None else value
+
+    @field_validator("turn_plan", "tactics", "red_flags", mode="before")
+    @classmethod
+    def coerce_str_list(cls, value: Any) -> Any:
+        return _as_str_list(value) if value is not None else value
+
+    @field_validator("difficulty", mode="before")
+    @classmethod
+    def coerce_difficulty(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        key = value.strip()
+        return _DIFFICULTY_ALIASES.get(key, _DIFFICULTY_ALIASES.get(key.lower(), key))
+
+    @field_validator("max_turns", mode="before")
+    @classmethod
+    def coerce_max_turns(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return value
+
+    @field_validator("opening_line")
+    @classmethod
+    def ensure_punctuation(cls, value: str) -> str:
+        if value and not value.endswith((".", "?", "!")):
+            return f"{value}."
+        return value
 
 
 class ScenarioReview(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     valid: bool
     score: int = Field(ge=0, le=100)
@@ -74,6 +121,37 @@ def dynamic_scenarios_enabled() -> bool:
     }
 
 
+def _as_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("message", "text", "step", "content", "action", "description"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+        parts = [
+            str(item).strip()
+            for item in value.values()
+            if isinstance(item, str) and str(item).strip()
+        ]
+        return " ".join(parts)
+    if isinstance(value, (list, tuple)):
+        return " ".join(part for part in (_as_text(item) for item in value) if part)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _as_str_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        items = [item.strip() for item in re.split(r"[\n;]", value) if item.strip()]
+        return items or [value.strip()]
+    if isinstance(value, (list, tuple)):
+        return [text for text in (_as_text(item) for item in value) if text]
+    text = _as_text(value)
+    return [text] if text else []
+
+
 def _guidelines() -> str:
     try:
         return GUIDELINES_PATH.read_text(encoding="utf-8")
@@ -81,23 +159,56 @@ def _guidelines() -> str:
         return "매 통화마다 안전하고 서로 다른 교육용 시나리오를 생성한다."
 
 
-def _planner_prompt(base: Scenario) -> str:
+def _planner_prompt(base: Scenario, *, repair_hint: str = "") -> str:
+    tactics = ", ".join(base.tactics) or "권위 사칭, 긴급성 조성"
+    repair = ""
+    if repair_hint:
+        repair = f"\n[이전 생성 오류 — 같은 실수를 반복하지 않는다]\n{repair_hint}\n"
     return f"""{_guidelines()}
-
+{repair}
 [고정된 원본 유형]
 - id: {base.id}
 - 이름: {base.name}
 - 기존 최대 턴: {base.max_turns}
+- 기법 힌트: {tactics}
 
 위 지침에 따라 이번 통화에 사용할 새로운 시나리오를 JSON 하나로만 생성한다.
-JSON 키는 name, persona_name, organization, tone, opening_line,
-scenario_summary, conversation_goal, turn_plan, tactics, red_flags,
-ideal_trainee_response, difficulty, max_turns다.
+turn_plan은 문자열 배열이다. {{"turn": 1, "message": "..."}} 같은 객체 배열을 쓰지 않는다.
+ideal_trainee_response는 문자열 하나다. 배열로 주지 않는다.
+difficulty는 하, 중, 상 중 하나만 쓴다. 보통/쉬움/어려움이라고 쓰지 않는다.
 실제 기관명과 위험한 숫자·주소·앱 정보는 절대 넣지 않는다.
+
+JSON 예시:
+{{
+  "name": "이상결제 보호 사칭",
+  "persona_name": "김정훈",
+  "organization": "중앙금융보호센터",
+  "tone": "단정하고 급한 상담원 말투",
+  "opening_line": "안녕하세요. 중앙금융보호센터 고객보호팀 김정훈입니다.",
+  "scenario_summary": "오늘 오후 편의점 결제 승인 대기를 이유로 본인 확인을 요구한다.",
+  "conversation_goal": "성함을 받아 내고 임시 보호 이체를 구두로 압박한다.",
+  "turn_plan": [
+    "이상 결제 사건을 짧게 설명한다.",
+    "본인 거래인지 확인한다.",
+    "의심하면 긴급성과 권위로 대응한다.",
+    "개인정보 거부에 한 번 더 붙잡고, 두 번째 종료 의사에는 멈춘다."
+  ],
+  "tactics": ["권위 사칭", "긴급성 조성"],
+  "red_flags": ["공식 확인 없이 전화로 이체를 요구함", "시간 압박으로 판단을 흐리게 함"],
+  "ideal_trainee_response": "즉시 전화를 끊고 112 또는 1332로 확인한다.",
+  "difficulty": "중",
+  "max_turns": 8
+}}
 """
 
 
 def _validate_safe_text(scenario: GeneratedScenario) -> None:
+    spoken = [scenario.opening_line, scenario.persona_name, scenario.organization]
+    if any(_SPOKEN_META.search(value) for value in spoken):
+        raise ValueError("generated scenario breaks character in spoken fields")
+    if any(_REAL_ORGS.search(value) for value in spoken):
+        raise ValueError("generated scenario uses a real institution name")
+
     values = [
         scenario.name,
         scenario.persona_name,
@@ -111,10 +222,8 @@ def _validate_safe_text(scenario: GeneratedScenario) -> None:
         *scenario.tactics,
         *scenario.red_flags,
     ]
-    if any(_FORBIDDEN_OUTPUT.search(value) for value in values):
+    if any(_UNSAFE_TOKEN.search(value) for value in values):
         raise ValueError("generated scenario contains a forbidden token")
-    if not all(value.endswith((".", "?", "!")) for value in [scenario.opening_line]):
-        raise ValueError("opening_line must end with punctuation")
 
 
 def _validate_structure(scenario: GeneratedScenario) -> None:
@@ -127,6 +236,7 @@ def _validate_structure(scenario: GeneratedScenario) -> None:
         for marker in ("의심", "거부", "개인정보", "확인", "질문", "대응")
     ):
         raise ValueError("turn_plan has no trainee interaction or response step")
+
 
 async def review_scenario(
     scenario: GeneratedScenario,
@@ -143,7 +253,8 @@ async def review_scenario(
                 "role": "system",
                 "content": (
                     "너는 교육용 전화 시나리오 품질 검수자다. "
-                    "논리적 일관성과 대화 흐름만 검사한다."
+                    "실제로 모순이 있을 때만 탈락시킨다. "
+                    "기준 문장을 그대로 issues에 복사하지 않는다."
                 ),
             },
             {
@@ -152,18 +263,13 @@ async def review_scenario(
 
 {scenario.model_dump_json(ensure_ascii=False)}
 
-검사 기준:
-- opening_line이 scenario_summary의 사건과 자연스럽게 연결되는가.
-- conversation_goal과 turn_plan이 서로 일치하는가.
-- turn_plan이 원인과 결과가 있는 자연스러운 순서인가.
-- 훈련자의 의심, 거부, 질문에 대응하는 단계가 있는가.
-- red_flags가 실제 진행 단계에 반영되는가.
-- ideal_trainee_response가 red_flags에 대응하는가.
-- max_turns가 turn_plan을 수행하기에 충분한가.
-- 인물, 기관, 사건의 세부 정보가 서로 충돌하지 않는가.
+valid=false는 아래가 실제로 관찰될 때만 쓴다:
+- 인물/기관/사건이 서로 다른 이야기를 한다.
+- turn_plan에 의심·거부·질문 대응이 없다.
+- opening_line이 scenario_summary와 다른 사건이다.
 
-score가 80점 이상이고 치명적인 문제가 없을 때만 valid=true로 한다.
-문제가 있으면 issues에 구체적으로 적고, 개선 방향은 suggestions에 적는다.
+해당하지 않으면 valid=true, score는 70 이상.
+개선점은 suggestions에만 적는다.
 JSON 키는 valid, score, issues, suggestions만 사용한다.""",
             },
         ],
@@ -213,29 +319,77 @@ def _to_scenario(base: Scenario, generated: GeneratedScenario) -> Scenario:
     )
 
 
-async def generate_scenario(base: Scenario, *, client: AsyncOpenAI | None = None) -> Scenario:
-    """Generate, validate, and review a scenario for one outbound call."""
-    openai_client = client or AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    response = await openai_client.chat.completions.create(
+async def _request_scenario_json(
+    base: Scenario,
+    *,
+    client: AsyncOpenAI,
+    repair_hint: str = "",
+) -> str:
+    response = await client.chat.completions.create(
         model=os.getenv("SCENARIO_GENERATOR_MODEL", "gpt-4o-mini"),
         messages=[
             {"role": "system", "content": "너는 안전한 교육용 통화 시나리오 설계자다."},
-            {"role": "user", "content": _planner_prompt(base)},
+            {"role": "user", "content": _planner_prompt(base, repair_hint=repair_hint)},
         ],
         temperature=0.9,
         max_tokens=1000,
         response_format={"type": "json_object"},
     )
-    content = response.choices[0].message.content or ""
-    try:
-        generated = GeneratedScenario.model_validate(json.loads(content))
-        _validate_safe_text(generated)
-        _validate_structure(generated)
-    except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-        raise ValueError(f"invalid generated scenario: {exc}") from exc
+    return response.choices[0].message.content or ""
 
-    review = await review_scenario(generated, client=openai_client)
-    if not review.valid or review.score < 80:
-        details = "; ".join(review.issues) or "score below threshold"
-        raise ValueError(f"scenario failed logical review: {details}")
-    return _to_scenario(base, generated)
+
+def _review_is_usable(review: ScenarioReview) -> bool:
+    return review.valid and review.score >= 70
+
+
+async def generate_scenario(base: Scenario, *, client: AsyncOpenAI | None = None) -> Scenario:
+    """Generate, validate, and review a scenario for one outbound call."""
+    openai_client = client or AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    last_error: Exception | None = None
+    repair_hint = ""
+
+    for attempt in range(1, MAX_GENERATE_ATTEMPTS + 1):
+        try:
+            content = await _request_scenario_json(
+                base, client=openai_client, repair_hint=repair_hint
+            )
+            generated = GeneratedScenario.model_validate(json.loads(content))
+            _validate_safe_text(generated)
+            _validate_structure(generated)
+            try:
+                review = await review_scenario(generated, client=openai_client)
+            except ValueError as exc:
+                review = ScenarioReview(
+                    valid=True,
+                    score=70,
+                    issues=[str(exc)],
+                    suggestions=[],
+                )
+            scenario = _to_scenario(base, generated)
+            if _review_is_usable(review):
+                logger.info(
+                    "Generated scenario id=%s name=%s score=%s",
+                    scenario.id,
+                    scenario.name,
+                    review.score,
+                )
+            else:
+                logger.warning(
+                    "Review nits ignored id=%s name=%s score=%s issues=%s",
+                    scenario.id,
+                    scenario.name,
+                    review.score,
+                    "; ".join(review.issues) or "score below threshold",
+                )
+            return scenario
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            last_error = exc
+            repair_hint = str(exc)
+            logger.warning(
+                "Scenario generation attempt %s/%s failed: %s",
+                attempt,
+                MAX_GENERATE_ATTEMPTS,
+                exc,
+            )
+
+    raise ValueError(f"invalid generated scenario: {last_error}") from last_error

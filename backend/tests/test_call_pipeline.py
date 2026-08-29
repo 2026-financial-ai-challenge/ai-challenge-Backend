@@ -68,7 +68,7 @@ def test_call_service_runtime_dependencies_are_imported():
 
 
 def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
-    monkeypatch.delenv("ELEVENLABS_VOICE_ID", raising=False)
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "testvoice123")
     monkeypatch.delenv("ELEVENLABS_STABILITY", raising=False)
     from app.services import call_service
     from app.training.pipeline_session import PhonePipelineSession
@@ -78,7 +78,7 @@ def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
     assert isinstance(session, PhonePipelineSession)
     assert session._stt._language == "ko"
     assert session._llm.model == "gpt-4o-mini"
-    assert session._tts.voice_id == scenario.tts_voice_id
+    assert session._tts.voice_id == "testvoice123"
     assert session._tts._stability == scenario.tts_stability
     assert session._llm._max_tokens == 180
     assert session._opening_line == scenario.opening_line

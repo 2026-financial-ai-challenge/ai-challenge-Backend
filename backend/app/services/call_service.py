@@ -92,6 +92,22 @@ def _tts_stability(scenario) -> float:
     return scenario.tts_stability
 
 
+def _tts_style(scenario) -> float:
+    """Voice style exaggeration. 0 (ElevenLabs' default) reads as a flat script."""
+    raw = os.getenv("ELEVENLABS_STYLE", "").strip()
+    if raw:
+        return float(raw)
+    return getattr(scenario, "tts_style", 0.15)
+
+
+def _tts_speed(scenario) -> float:
+    """Slightly under 1.0 so the caller doesn't sound rushed."""
+    raw = os.getenv("ELEVENLABS_SPEED", "").strip()
+    if raw:
+        return float(raw)
+    return getattr(scenario, "tts_speed", 0.94)
+
+
 def phone_system_prompt(scenario) -> str:
     return (
         f"{scenario.system_prompt}\n\n"
@@ -124,6 +140,31 @@ def build_pipeline_session(scenario):
         ) from exc
 
     voice_id = _tts_voice_id(scenario)
+
+    # Built separately so we can see which naturalness settings the installed
+    # ClawOps ElevenLabsTTS actually accepts. _supported_kwargs() drops unknown
+    # ones silently, which would otherwise make a voice-tuning change look
+    # applied when it never reached ElevenLabs.
+    tts_requested = dict(
+        voice_id=voice_id,
+        model=os.getenv("ELEVENLABS_MODEL_ID", "eleven_turbo_v2_5").strip()
+        or "eleven_turbo_v2_5",
+        stability=_tts_stability(scenario),
+        similarity_boost=scenario.tts_similarity_boost,
+        style=_tts_style(scenario),
+        use_speaker_boost=True,
+        speed=_tts_speed(scenario),
+        language_code="ko",
+    )
+    tts_kwargs = _supported_kwargs(ElevenLabsTTS, **tts_requested)
+    dropped = sorted(set(tts_requested) - set(tts_kwargs))
+    if dropped:
+        logger.warning(
+            "ElevenLabsTTS ignored unsupported voice settings: %s "
+            "(the installed clawops build does not accept them)",
+            ", ".join(dropped),
+        )
+
     session_kwargs = _supported_kwargs(
         PhonePipelineSession,
         system_prompt=phone_system_prompt(scenario),
@@ -140,21 +181,15 @@ def build_pipeline_session(scenario):
             **_supported_kwargs(
                 OpenAILLM,
                 model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
-                temperature=0.55,
+                # Raised from 0.55. At the old value the caller reused the same
+                # phrasing turn after turn, which reads as scripted. This matches
+                # ai/llm_stream.py's default so the phone pipeline and the local
+                # ai/ pipeline behave the same way.
+                temperature=0.75,
                 max_tokens=180,
             )
         ),
-        tts=ElevenLabsTTS(
-            **_supported_kwargs(
-                ElevenLabsTTS,
-                voice_id=voice_id,
-                model=os.getenv("ELEVENLABS_MODEL_ID", "eleven_turbo_v2_5").strip()
-                or "eleven_turbo_v2_5",
-                stability=_tts_stability(scenario),
-                similarity_boost=scenario.tts_similarity_boost,
-                language_code="ko",
-            )
-        ),
+        tts=ElevenLabsTTS(**tts_kwargs),
         greeting=True,
         opening_line=scenario.opening_line,
         max_turns=scenario.max_turns,

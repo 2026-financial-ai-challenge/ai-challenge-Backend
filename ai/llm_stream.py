@@ -29,7 +29,10 @@ async def generate_llm_sentences(
     *,
     client: AsyncOpenAI | None = None,
     model: str | None = None,
-    temperature: float = 0.65,
+    # Raised from 0.65 -- at the old value the model tended to reuse the same
+    # phrasing turn after turn, which reads as scripted/robotic. This still
+    # keeps coherent short phone-register replies while adding variety.
+    temperature: float = 0.75,
     max_tokens: int = 180,
     on_first_token: Callable[[], None] | None = None,
 ) -> AsyncIterator[str]:

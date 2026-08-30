@@ -48,8 +48,15 @@ async def stream_tts(
             voice_id=voice_id or (scenario.tts_voice_id if scenario else None) or elevenlabs_voice_id(),
             model_id=model_id or elevenlabs_model_id(),
             output_format=output_format or elevenlabs_output_format(),
-            stability=scenario.tts_stability if scenario else 0.74,
-            similarity_boost=scenario.tts_similarity_boost if scenario else 0.72,
+            # 0.74/0.72 used to be the no-scenario fallback, which contradicts
+            # ai/voices.py's own guidance ("lower stability ~0.35-0.45 sounds more
+            # human; 0.7+ sounds like a robot"). In real calls a scenario is always
+            # passed so this rarely fires, but it should agree with that guidance
+            # instead of quietly shipping the robotic-sounding defaults.
+            stability=scenario.tts_stability if scenario else 0.35,
+            similarity_boost=scenario.tts_similarity_boost if scenario else 0.4,
+            style=scenario.tts_style if scenario else 0.15,
+            speed=scenario.tts_speed if scenario else 0.94,
         ):
             yield chunk
     finally:
@@ -66,6 +73,8 @@ async def _request_stream(
     output_format: str,
     stability: float,
     similarity_boost: float,
+    style: float,
+    speed: float,
 ) -> AsyncIterator[bytes]:
     url = _TTS_URL.format(voice_id=voice_id)
     headers = {
@@ -80,7 +89,12 @@ async def _request_stream(
         "voice_settings": {
             "stability": stability,
             "similarity_boost": similarity_boost,
-            "speed": 0.94,
+            # style/use_speaker_boost were previously left at ElevenLabs'
+            # defaults (0 / off), which reads as a flat script. speaker_boost
+            # keeps articulation clear at the low stability we use.
+            "style": style,
+            "use_speaker_boost": True,
+            "speed": speed,
         },
     }
 

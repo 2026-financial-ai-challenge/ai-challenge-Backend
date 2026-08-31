@@ -6,8 +6,14 @@ from ai.safety import sanitize_spoken_text
 
 _HARD_ENDINGS = set(".!?。！？\n")
 _SOFT_BREAKS = set(",，、; ")
-_SOFT_FLUSH_LEN = 64
-_HARD_FLUSH_LEN = 96
+# These only matter when the model hasn't produced sentence-final punctuation
+# yet (._find_hard_end always flushes immediately regardless of length).
+# Raised from 64/96 to let more text accumulate into one natural-sounding
+# chunk before we force a cut at a comma — trades a bit of latency for
+# fewer mid-clause TTS breaks. Lower these again if latency becomes the
+# priority instead.
+_SOFT_FLUSH_LEN = 88
+_HARD_FLUSH_LEN = 128
 
 
 def split_complete_text(text: str) -> list[str]:

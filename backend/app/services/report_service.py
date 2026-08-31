@@ -62,8 +62,11 @@ _NAME_OFFER = re.compile(
 
 class _LlmReport(BaseModel):
     suspected: bool = False
+    suspectedEvidence: str = ""
     gaveName: bool = False
+    gaveNameEvidence: str = ""
     triedHangup: bool = False
+    triedHangupEvidence: str = ""
     summary: str = ""
     coaching: str = ""
     riskBehaviors: list[BehaviorItem] = Field(default_factory=list)
@@ -248,11 +251,14 @@ async def score_conversation(
         defense_labels,
         trainee_text,
     )
+    suspected = _grounded_flag(parsed.suspected, parsed.suspectedEvidence, trainee_text)
+    gave_name = _grounded_flag(parsed.gaveName, parsed.gaveNameEvidence, trainee_text)
+    tried_hangup = _grounded_flag(parsed.triedHangup, parsed.triedHangupEvidence, trainee_text)
     return TrainingReport(
         score=calculate_response_score(risk_behaviors, defense_behaviors),
-        suspected=parsed.suspected,
-        gaveName=parsed.gaveName,
-        triedHangup=parsed.triedHangup,
+        suspected=suspected,
+        gaveName=gave_name,
+        triedHangup=tried_hangup,
         summary=parsed.summary.strip() or heuristic_report(transcript, source=source).summary,
         coaching=parsed.coaching.strip()
         or heuristic_report(transcript, source=source).coaching,
@@ -525,6 +531,22 @@ def _keep_supported(
     return supported
 
 
+def _grounded_flag(flag: bool, evidence: str, trainee_text: str) -> bool:
+    """Downgrade an ungrounded suspected/gaveName/triedHangup claim to False.
+
+    riskBehaviors/defenseBehaviors were already dropped unless their evidence
+    is actually found in what the trainee said (_keep_supported below) -- these
+    three summary booleans had no such check and were trusted straight off the
+    LLM's JSON. Hold them to the same bar.
+    """
+    if not flag:
+        return False
+    normalized_evidence = _normalize_evidence(evidence)
+    if not normalized_evidence:
+        return False
+    return normalized_evidence in _normalize_evidence(trainee_text)
+
+
 def _trainee_text(transcript: str) -> str:
     lines = (transcript or "").splitlines()
     has_speaker_labels = any(
@@ -608,8 +630,11 @@ async def _ask_report_llm(
 형식:
 {{
   "suspected": true,
+  "suspectedEvidence": "훈련자가 실제로 한 말 그대로 인용",
   "gaveName": false,
+  "gaveNameEvidence": "",
   "triedHangup": true,
+  "triedHangupEvidence": "훈련자가 실제로 한 말 그대로 인용",
   "summary": "2~4문장 한국어 요약",
   "coaching": "다음에 이렇게 하세요. 2~3문장",
   "riskBehaviors": [{{"label": "...", "evidence": "..."}}],
@@ -617,9 +642,10 @@ async def _ask_report_llm(
 }}
 
 규칙:
-- suspected: 훈련자가 상대 신원·기관을 의심하거나 확인하려 했는지
-- gaveName: 훈련자가 성함이나 이름을 댔는지
-- triedHangup: 끊겠다고 하거나 통화를 끝내려고 했는지
+- suspected: 훈련자가 상대 신원·기관을 의심하거나 확인하려 했는지. true면 suspectedEvidence에 훈련자가 실제로 한 말을 그대로 인용한다. 근거로 댈 말이 없으면 suspected는 false로 한다.
+- gaveName: 훈련자가 성함이나 이름을 댔는지. true면 gaveNameEvidence에 그 말을 그대로 인용한다. 근거 없으면 false로 한다.
+- triedHangup: 끊겠다고 하거나 통화를 끝내려고 했는지. true면 triedHangupEvidence에 그 말을 그대로 인용한다. 근거 없으면 false로 한다.
+- 모든 evidence 필드는 훈련자 발화를 그대로 가져온 짧은 인용이어야 하며, 지어내지 않는다.
 - riskBehaviors label은 다음만: {", ".join(risk_labels)}
 - defenseBehaviors label은 다음만: {", ".join(defense_labels)}
 - evidence는 짧은 인용. 근거 없으면 그 라벨을 넣지 마라

@@ -12,6 +12,7 @@ from typing import Any
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from ai.config import openai_api_key
 from ai.safety import SAFETY_RULES
 from ai.scenarios.types import Scenario
 from ai.voices import Onyu
@@ -32,10 +33,22 @@ _DIFFICULTY_ALIASES = {
     "hard": "상",
 }
 _SPOKEN_META = re.compile(
-    r"(?<![A-Za-z])AI(?![A-Za-z])|프롬프트|시뮬레이션",
+    r"(?<![A-Za-z])AI(?![A-Za-z])|모델|프롬프트|훈련|시뮬레이션",
     re.IGNORECASE,
 )
-_REAL_ORGS = re.compile(r"금감원|금융감독원|검찰청|경찰청|국민은행|신한은행|카카오뱅크")
+# Broad, not just the handful of names the model is most likely to reach for —
+# this list is checked against every field that can end up in the live system
+# prompt, so it is worth erring toward too many real institutions rather than
+# too few.
+_REAL_ORGS = re.compile(
+    r"금융감독원|금감원|검찰청|경찰청|지방경찰청|사이버수사대|국세청|관세청|"
+    r"금융위원회|개인정보보호위원회|건강보험공단|국민연금공단|"
+    r"국민은행|KB국민은행|신한은행|우리은행|하나은행|기업은행|IBK기업은행|"
+    r"농협은행|NH농협|수협은행|새마을금고|신협|우체국|저축은행|"
+    r"신한카드|삼성카드|현대카드|국민카드|KB국민카드|롯데카드|하나카드|우리카드|비씨카드|"
+    r"카카오뱅크|케이뱅크|토스뱅크|토스|카카오페이|네이버페이|페이코|"
+    r"쿠팡|배달의민족|CJ대한통운|대한통운|우체국택배|롯데택배|한진택배"
+)
 _UNSAFE_TOKEN = re.compile(r"https?://|www\.|\d{6,}", re.IGNORECASE)
 
 
@@ -156,6 +169,16 @@ def _guidelines() -> str:
     try:
         return GUIDELINES_PATH.read_text(encoding="utf-8")
     except OSError:
+        # This used to fail silently into a one-line generic prompt, which
+        # would quietly drop most of the safety/variety rules with no signal
+        # anywhere that it happened. Make it loud instead.
+        logger.warning(
+            "Could not read scenario guidelines at %s; falling back to a "
+            "one-line generic prompt. Scenario safety/variety rules from "
+            "scenario_generation_guidelines.md are NOT being applied until "
+            "this path is fixed.",
+            GUIDELINES_PATH,
+        )
         return "매 통화마다 안전하고 서로 다른 교육용 시나리오를 생성한다."
 
 
@@ -203,12 +226,11 @@ JSON 예시:
 
 
 def _validate_safe_text(scenario: GeneratedScenario) -> None:
-    spoken = [scenario.opening_line, scenario.persona_name, scenario.organization]
-    if any(_SPOKEN_META.search(value) for value in spoken):
-        raise ValueError("generated scenario breaks character in spoken fields")
-    if any(_REAL_ORGS.search(value) for value in spoken):
-        raise ValueError("generated scenario uses a real institution name")
-
+    # Check every field that can end up in the live system prompt, not just
+    # opening_line/persona_name/organization — scenario_summary and
+    # conversation_goal are folded into the prompt verbatim (see
+    # _to_scenario), so a leak there is just as exploitable as one in the
+    # fields the character actually speaks.
     values = [
         scenario.name,
         scenario.persona_name,
@@ -222,6 +244,10 @@ def _validate_safe_text(scenario: GeneratedScenario) -> None:
         *scenario.tactics,
         *scenario.red_flags,
     ]
+    if any(_SPOKEN_META.search(value) for value in values):
+        raise ValueError("generated scenario breaks character (meta wording found)")
+    if any(_REAL_ORGS.search(value) for value in values):
+        raise ValueError("generated scenario uses a real institution name")
     if any(_UNSAFE_TOKEN.search(value) for value in values):
         raise ValueError("generated scenario contains a forbidden token")
 
@@ -301,6 +327,9 @@ def _to_scenario(base: Scenario, generated: GeneratedScenario) -> Scenario:
 - 목록, 마크다운, 내레이터 지문을 말하지 않는다.
 - 실제 기관명, 번호, URL, 앱 이름을 말하지 않는다.
 - 이 통화의 사건과 인물 설정을 끝까지 일관되게 유지한다.
+- 상대가 방금 한 말에 직접 반응해라. 미리 정해둔 대사를 순서대로 읽지 마라.
+- 같은 표현을 반복하지 마라. 매 응답마다 어휘와 문장 구조를 바꿔라.
+- "음", "아", "그러니까" 같은 자연스러운 구어체 접속어를 필요할 때 섞어 써라.
 """
     return Scenario(
         id=f"{base.id}:dynamic",
@@ -311,6 +340,8 @@ def _to_scenario(base: Scenario, generated: GeneratedScenario) -> Scenario:
         tts_voice_id=base.tts_voice_id or Onyu,
         tts_stability=base.tts_stability,
         tts_similarity_boost=base.tts_similarity_boost,
+        tts_style=base.tts_style,
+        tts_speed=base.tts_speed,
         subtype=base.subtype,
         difficulty=generated.difficulty,
         tactics=tuple(generated.tactics),
@@ -339,12 +370,26 @@ async def _request_scenario_json(
 
 
 def _review_is_usable(review: ScenarioReview) -> bool:
-    return review.valid and review.score >= 70
+    # Matches the 80-point bar documented in scenario_generation_guidelines.md.
+    return review.valid and review.score >= 80
 
 
 async def generate_scenario(base: Scenario, *, client: AsyncOpenAI | None = None) -> Scenario:
-    """Generate, validate, and review a scenario for one outbound call."""
-    openai_client = client or AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    """Generate, validate, and review a scenario for one outbound call.
+
+    A scenario that fails review (score < 80, or the review call itself
+    breaks) is never returned — the attempt is retried with the failure
+    reason fed back as a repair hint, so the 80-point gate documented in
+    scenario_generation_guidelines.md is actually enforced instead of only
+    logged. Callers already fall back to the static safety scenario if every
+    attempt is exhausted (see app/services/call_service.get_runtime_scenario).
+    """
+    # Route through ai.config so a missing key raises the same friendly,
+    # actionable error as everywhere else in ai/ ("copy .env.example to
+    # .env..."), instead of a bare KeyError that only avoided happening
+    # before because some other module happened to import ai.config first
+    # and load .env as a side effect.
+    openai_client = client or AsyncOpenAI(api_key=openai_api_key())
     last_error: Exception | None = None
     repair_hint = ""
 
@@ -356,31 +401,19 @@ async def generate_scenario(base: Scenario, *, client: AsyncOpenAI | None = None
             generated = GeneratedScenario.model_validate(json.loads(content))
             _validate_safe_text(generated)
             _validate_structure(generated)
-            try:
-                review = await review_scenario(generated, client=openai_client)
-            except ValueError as exc:
-                review = ScenarioReview(
-                    valid=True,
-                    score=70,
-                    issues=[str(exc)],
-                    suggestions=[],
+            review = await review_scenario(generated, client=openai_client)
+            if not _review_is_usable(review):
+                details = "; ".join(review.issues) or "score below 80-point bar"
+                raise ValueError(
+                    f"scenario review rejected (score={review.score}): {details}"
                 )
             scenario = _to_scenario(base, generated)
-            if _review_is_usable(review):
-                logger.info(
-                    "Generated scenario id=%s name=%s score=%s",
-                    scenario.id,
-                    scenario.name,
-                    review.score,
-                )
-            else:
-                logger.warning(
-                    "Review nits ignored id=%s name=%s score=%s issues=%s",
-                    scenario.id,
-                    scenario.name,
-                    review.score,
-                    "; ".join(review.issues) or "score below threshold",
-                )
+            logger.info(
+                "Generated scenario id=%s name=%s score=%s",
+                scenario.id,
+                scenario.name,
+                review.score,
+            )
             return scenario
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_error = exc

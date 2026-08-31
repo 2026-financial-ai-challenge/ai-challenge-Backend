@@ -10,11 +10,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: "postgresql://safety_phishing_user:${LOCAL_DB_PASSWORD:-local_dev_password}@db:5432/safety_phishing_call"
       UVICORN_RELOAD: "1"
-    depends_on:
-      db:
-        condition: service_healthy
     command: sh start.sh
   db:
     image: postgres:16

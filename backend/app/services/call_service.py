@@ -77,6 +77,15 @@ def _supported_kwargs(cls, **kwargs):
 
 
 def _tts_voice_id(scenario) -> str:
+    random_enabled = os.getenv(
+        "ELEVENLABS_VOICE_RANDOM", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+    if random_enabled:
+        from ai.voices import random_voice_id
+
+        return random_voice_id()
+
     override = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
     if override:
         return "".join(ch for ch in override if ch.isascii() and not ch.isspace())

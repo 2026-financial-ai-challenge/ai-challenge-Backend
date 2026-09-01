@@ -71,6 +71,7 @@ def test_call_service_runtime_dependencies_are_imported():
 
 
 def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_VOICE_RANDOM", "false")
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "testvoice123")
     monkeypatch.delenv("ELEVENLABS_STABILITY", raising=False)
     from app.services import call_service
@@ -91,11 +92,22 @@ def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
 
 
 def test_env_voice_id_overrides_scenario(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_VOICE_RANDOM", "false")
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "clonedvoiceid123")
     from app.services.call_service import _tts_voice_id
 
     scenario = get_call_scenario()
     assert _tts_voice_id(scenario) == "clonedvoiceid123"
+
+
+def test_random_voice_mode_uses_available_voice(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_VOICE_RANDOM", "true")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "ignoredvoiceid")
+    monkeypatch.setattr("ai.voices.random_voice_id", lambda: "randomvoiceid123")
+    from app.services.call_service import _tts_voice_id
+
+    scenario = get_call_scenario()
+    assert _tts_voice_id(scenario) == "randomvoiceid123"
 
 
 def _results(transcript: str, *, is_final: bool, speech_final: bool) -> dict:

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-import pytest
+import asyncio
 
 from app.services.call_service import _supported_kwargs, phone_system_prompt
 from app.training.deepgram_stt import UtteranceAssembler
@@ -73,6 +73,9 @@ def test_call_service_runtime_dependencies_are_imported():
 def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
     monkeypatch.setenv("ELEVENLABS_VOICE_RANDOM", "false")
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "testvoice123")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
     monkeypatch.delenv("ELEVENLABS_STABILITY", raising=False)
     from app.services import call_service
     from app.training.pipeline_session import PhonePipelineSession
@@ -82,8 +85,13 @@ def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
     assert isinstance(session, PhonePipelineSession)
     assert session._stt._language == "ko"
     assert session._llm.model == "gpt-4o-mini"
+    from app.training.elevenlabs_tts import PhoneElevenLabsTTS
+
+    assert isinstance(session._tts, PhoneElevenLabsTTS)
     assert session._tts.voice_id == "testvoice123"
     assert session._tts._stability == scenario.tts_stability
+    assert session._tts._style == scenario.tts_style
+    assert session._tts._speed == scenario.tts_speed
     assert session._llm._max_tokens == 180
     assert session._opening_line == scenario.opening_line
     assert session._max_turns == scenario.max_turns
@@ -219,3 +227,68 @@ def test_call_had_transcript_accepts_assistant_only_call(monkeypatch):
         lambda _id: SimpleNamespace(turns=[]),
     )
     assert not call_service.call_had_transcript("ses_1")
+
+
+def test_answered_call_without_speech_is_completed():
+    from app.services.call_service import classify_finished_call
+
+    answered = SimpleNamespace(ended_status="completed", ended_duration=12, status="ended")
+    assert classify_finished_call(answered, spoke=False) == "completed"
+    assert classify_finished_call(answered, spoke=True) == "completed"
+
+
+def test_no_answer_is_missed_even_if_status_looks_ended():
+    from app.services.call_service import classify_finished_call
+
+    missed = SimpleNamespace(ended_status="no-answer", ended_duration=0, status="no-answer")
+    assert classify_finished_call(missed, spoke=False) == "missed"
+    rejected = SimpleNamespace(ended_status="rejected", ended_duration=None, status="ended")
+    assert classify_finished_call(rejected, spoke=False) == "missed"
+
+
+def test_sanitize_tts_text_strips_stretched_korean():
+    from app.training.elevenlabs_tts import sanitize_tts_text
+
+    assert sanitize_tts_text("전화받으세요오오오~~") == "전화받으세요"
+    assert sanitize_tts_text("안녕하세요...") == "안녕하세요."
+    assert sanitize_tts_text("  확인합니다.  ") == "확인합니다."
+    assert sanitize_tts_text("안녕하세요.") == "안녕하세요."
+
+
+def test_align_pcm16_strips_wav_header_and_odd_bytes():
+    from app.training.elevenlabs_tts import align_pcm16, strip_wav_header
+
+    pcm = bytes(range(12))
+    data_size = len(pcm).to_bytes(4, "little")
+    wav = (
+        b"RIFF"
+        + (36 + len(pcm)).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + (16).to_bytes(4, "little")
+        + b"\x01\x00\x01\x00"
+        + (24000).to_bytes(4, "little")
+        + (48000).to_bytes(4, "little")
+        + b"\x02\x00\x10\x00"
+        + b"data"
+        + data_size
+        + pcm
+    )
+    assert strip_wav_header(wav) == pcm
+    assert align_pcm16(wav) == pcm
+    assert align_pcm16(b"\x01\x02\x03\x04\x05") == b""
+    assert align_pcm16(bytes(range(7))) == bytes(range(6))
+
+
+def test_generate_greeting_is_deferred_until_attach():
+    from app.training.pipeline_session import PhonePipelineSession
+
+    session = PhonePipelineSession(
+        stt=SimpleNamespace(),
+        llm=SimpleNamespace(),
+        tts=SimpleNamespace(),
+        opening_line="안녕하세요. 확인 전화입니다.",
+        greeting=True,
+    )
+    asyncio.run(session._generate_greeting())
+    assert session._opening_task is None
+    assert session._current_response_task is None

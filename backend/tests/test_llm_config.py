@@ -26,7 +26,7 @@ def test_gemini_settings_use_compat_endpoint(monkeypatch):
     settings = llm_settings()
     assert settings.provider == "gemini"
     assert settings.api_key == "gemini-test-key"
-    assert settings.model == "gemini-2.5-flash"
+    assert settings.model == "gemini-3.6-flash"
     assert settings.base_url == GEMINI_OPENAI_BASE_URL
 
 
@@ -45,12 +45,12 @@ def test_build_pipeline_session_uses_gemini_model(monkeypatch):
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "testvoice123")
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
     from app.services import call_service
     from app.training.scenarios import get_call_scenario
 
     session = call_service.build_pipeline_session(get_call_scenario())
-    assert session._llm.model == "gemini-2.5-flash"
+    assert session._llm.model == "gemini-3.6-flash"
     assert os.environ["OPENAI_BASE_URL"] == GEMINI_OPENAI_BASE_URL

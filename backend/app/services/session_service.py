@@ -47,6 +47,27 @@ def get_session(session_id: str) -> SessionResponse | None:
         return _to_response(session) if session is not None else None
 
 
+def get_current_session(participant_id: int) -> SessionResponse | None:
+    """Most recently updated in-progress session for this participant."""
+    with SessionLocal() as db:
+        session = db.scalar(
+            select(TrainingSession)
+            .options(
+                selectinload(TrainingSession.consent),
+                selectinload(TrainingSession.participant),
+                selectinload(TrainingSession.calls),
+            )
+            .where(TrainingSession.participant_id == participant_id)
+            .where(
+                (TrainingSession.report_status.is_(None))
+                | (TrainingSession.report_status != "final")
+            )
+            .order_by(TrainingSession.updated_at.desc())
+            .limit(1)
+        )
+        return _to_response(session) if session is not None else None
+
+
 def session_exists(session_id: str) -> bool:
     with SessionLocal() as db:
         return db.get(TrainingSession, session_id) is not None

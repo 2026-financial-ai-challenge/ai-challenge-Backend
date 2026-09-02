@@ -24,6 +24,8 @@ _WAVY = re.compile(r"[~～]+")
 _ELLIPSIS = re.compile(r"\.{2,}|…+")
 _STRETCHED = re.compile(r"([가-힣])\1+")
 _YO_STRETCH = re.compile(r"요오+$")
+# 24 kHz → 8 kHz is 3:1, so keep a multiple of 3 samples (6 bytes).
+_PCM16_ALIGN = 6
 
 
 def sanitize_tts_text(text: str) -> str:
@@ -33,6 +35,29 @@ def sanitize_tts_text(text: str) -> str:
     spoken = _STRETCHED.sub(r"\1", spoken)
     spoken = _YO_STRETCH.sub("요", spoken)
     return spoken.strip()
+
+
+def strip_wav_header(payload: bytes) -> bytes:
+    """Drop a RIFF/WAVE wrapper so the header is not played as PCM."""
+    if len(payload) < 44 or payload[:4] != b"RIFF" or payload[8:12] != b"WAVE":
+        return payload
+    offset = 12
+    while offset + 8 <= len(payload):
+        chunk_id = payload[offset : offset + 4]
+        chunk_size = int.from_bytes(payload[offset + 4 : offset + 8], "little")
+        offset += 8
+        if chunk_id == b"data":
+            end = offset + chunk_size if chunk_size else len(payload)
+            return payload[offset:end]
+        offset += chunk_size + (chunk_size % 2)
+    return payload
+
+
+def align_pcm16(payload: bytes) -> bytes:
+    """Keep complete 16-bit frames that resample 24 kHz → 8 kHz cleanly."""
+    pcm = strip_wav_header(payload)
+    n = len(pcm) - (len(pcm) % _PCM16_ALIGN)
+    return pcm[:n]
 
 
 class PhoneElevenLabsTTS(ElevenLabsTTS):
@@ -107,6 +132,17 @@ class PhoneElevenLabsTTS(ElevenLabsTTS):
                 raise RuntimeError(
                     f"ElevenLabs TTS failed ({response.status_code}): {body[:400]}"
                 )
+            # Collect the sentence first. Streaming odd-sized HTTP chunks
+            # through 16-bit resample plays the header/remainder as a burst
+            # of fake syllables before the real 안녕하세요.
+            raw = bytearray()
             async for chunk in response.aiter_bytes(chunk_size=4096):
                 if chunk:
-                    yield chunk
+                    raw.extend(chunk)
+            pcm = align_pcm16(bytes(raw))
+            frame = 960  # 20 ms at 24 kHz PCM16, divisible by 24k→8k
+            for offset in range(0, len(pcm), frame):
+                piece = pcm[offset : offset + frame]
+                aligned = align_pcm16(piece) if len(piece) < frame else piece
+                if aligned:
+                    yield aligned

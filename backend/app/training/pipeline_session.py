@@ -141,13 +141,30 @@ class PhonePipelineSession(PipelineSession):
         return
 
     async def _speak_opening_after_answer(self) -> None:
+        opening = self._opening_line or _FALLBACK_OPENING
+        render = asyncio.create_task(self._render_tts_pcm(opening))
         try:
             await asyncio.sleep(_ANSWER_SETTLE_SECONDS)
+            pcm = await render
         except asyncio.CancelledError:
+            render.cancel()
             return
         if not self._running or not self._call:
             return
-        await self._speak_fixed(self._opening_line or _FALLBACK_OPENING)
+        await self._play_pcm16(pcm, spoken=opening)
+
+    async def _render_tts_pcm(self, text: str) -> bytes:
+        spoken = text.strip()
+        if not spoken:
+            return b""
+
+        async def sentences() -> AsyncIterator[str]:
+            yield spoken
+
+        parts: list[bytes] = []
+        async for audio in self._tts.synthesize(sentences()):
+            parts.append(audio)
+        return b"".join(parts)
 
     async def _unlock_greeting(self, delay: float) -> None:
         try:
@@ -220,26 +237,39 @@ class PhonePipelineSession(PipelineSession):
             if hang_up_after:
                 await self._hang_up()
             return
+        pcm = await self._render_tts_pcm(spoken)
+        await self._play_pcm16(pcm, spoken=spoken, hang_up_after=hang_up_after)
+
+    async def _play_pcm16(
+        self,
+        pcm: bytes,
+        *,
+        spoken: str,
+        hang_up_after: bool = False,
+    ) -> None:
+        if not pcm or not self._call:
+            if hang_up_after:
+                await self._hang_up()
+            return
         try:
-
-            async def sentences() -> AsyncIterator[str]:
-                yield spoken
-
             tts_sample_rate = getattr(self._tts, "sample_rate", 24000)
             self._sent_audio_chunks = 0
-            async for audio in self._tts.synthesize(sentences()):
+            pcm8k = resample_pcm16(pcm, from_rate=tts_sample_rate, to_rate=8000)
+            ulaw = pcm16_to_ulaw(pcm8k)
+            if not self._first_audio_logged:
+                from clawops.agent.pipeline._buffering_call import (
+                    log_first_realtime_audio,
+                )
+
+                log_first_realtime_audio(self._call)
+                self._first_audio_logged = True
+            # 20 ms at 8 kHz µ-law. Send framed so the media path is not
+            # handed the whole greeting as one burst.
+            frame = 160
+            for offset in range(0, len(ulaw), frame):
                 if not self._running or not self._call:
                     break
-                pcm8k = resample_pcm16(audio, from_rate=tts_sample_rate, to_rate=8000)
-                ulaw = pcm16_to_ulaw(pcm8k)
-                if not self._first_audio_logged:
-                    from clawops.agent.pipeline._buffering_call import (
-                        log_first_realtime_audio,
-                    )
-
-                    log_first_realtime_audio(self._call)
-                    self._first_audio_logged = True
-                await self._call.send_audio(ulaw)
+                await self._call.send_audio(ulaw[offset : offset + frame])
                 self._sent_audio_chunks += 1
             log.info("Assistant: %s", spoken[:100])
             if self._call:

@@ -255,6 +255,30 @@ def test_sanitize_tts_text_strips_stretched_korean():
     assert sanitize_tts_text("안녕하세요.") == "안녕하세요."
 
 
+def test_align_pcm16_strips_wav_header_and_odd_bytes():
+    from app.training.elevenlabs_tts import align_pcm16, strip_wav_header
+
+    pcm = bytes(range(12))
+    data_size = len(pcm).to_bytes(4, "little")
+    wav = (
+        b"RIFF"
+        + (36 + len(pcm)).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + (16).to_bytes(4, "little")
+        + b"\x01\x00\x01\x00"
+        + (24000).to_bytes(4, "little")
+        + (48000).to_bytes(4, "little")
+        + b"\x02\x00\x10\x00"
+        + b"data"
+        + data_size
+        + pcm
+    )
+    assert strip_wav_header(wav) == pcm
+    assert align_pcm16(wav) == pcm
+    assert align_pcm16(b"\x01\x02\x03\x04\x05") == b""
+    assert align_pcm16(bytes(range(7))) == bytes(range(6))
+
+
 def test_generate_greeting_is_deferred_until_attach():
     from app.training.pipeline_session import PhonePipelineSession
 

@@ -26,6 +26,25 @@ def openai_model() -> str:
     return os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 
 
+# Gemini's OpenAI-compatible endpoint: https://ai.google.dev/gemini-api/docs/openai
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
+def scenario_llm_provider() -> str:
+    """Which LLM backend generates/reviews dynamic call scenarios.
+
+    'openai' (default) or 'gemini'. Lets a quota-exhausted OpenAI key be
+    swapped for a Gemini free-tier key without touching scenario generation
+    code — Gemini is queried through its OpenAI-compatible endpoint, so the
+    same AsyncOpenAI client works for both.
+    """
+    return os.getenv("SCENARIO_LLM_PROVIDER", "openai").strip().lower() or "openai"
+
+
+def gemini_api_key() -> str:
+    return _require("GEMINI_API_KEY")
+
+
 def elevenlabs_api_key() -> str:
     return _require("ELEVENLABS_API_KEY")
 

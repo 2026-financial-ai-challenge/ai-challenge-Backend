@@ -74,6 +74,7 @@ def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
     monkeypatch.setenv("ELEVENLABS_VOICE_RANDOM", "false")
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "testvoice123")
     monkeypatch.delenv("ELEVENLABS_STABILITY", raising=False)
+    monkeypatch.delenv("CALL_LLM_PROVIDER", raising=False)
     from app.services import call_service
     from app.training.pipeline_session import PhonePipelineSession
 
@@ -89,6 +90,22 @@ def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
     assert session._max_turns == scenario.max_turns
     assert scenario.opening_line in session._system_prompt
     assert session._greeting is True
+
+
+def test_build_pipeline_session_uses_gemini_when_selected(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_VOICE_RANDOM", "false")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "testvoice123")
+    monkeypatch.delenv("ELEVENLABS_STABILITY", raising=False)
+    monkeypatch.setenv("CALL_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    from app.services import call_service
+
+    scenario = get_call_scenario()
+    session = call_service.build_pipeline_session(scenario)
+    assert session._llm.provider == "gemini"
+    assert session._llm.model == "gemini-3.5-flash-lite"
+    assert session._llm._max_tokens == 180
 
 
 def test_env_voice_id_overrides_scenario(monkeypatch):

@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, select
 
 from app.database import SessionLocal
 from app.models.call import Call
+from app.models.scheduled_training import ScheduledTraining
 from app.models.training_report import TrainingReportRecord
 from app.models.transcript_turn import TranscriptTurnRecord
 
@@ -125,7 +126,7 @@ def append_turn(
 def get_report(session_id: str) -> GetReportResponse:
     with SessionLocal() as db:
         call = _latest_call(db, session_id)
-        turns = db.scalars(
+        draft_turn_rows = db.scalars(
             select(TranscriptTurnRecord)
             .where(
                 TranscriptTurnRecord.session_id == session_id,
@@ -133,6 +134,7 @@ def get_report(session_id: str) -> GetReportResponse:
             )
             .order_by(TranscriptTurnRecord.sequence)
         ).all()
+        turns = draft_turn_rows
         reports = db.scalars(
             select(TrainingReportRecord).where(
                 TrainingReportRecord.session_id == session_id
@@ -140,6 +142,56 @@ def get_report(session_id: str) -> GetReportResponse:
         ).all()
         draft_row = next((row for row in reports if row.source == "live"), None)
         final_row = next((row for row in reports if row.source == "clawops"), None)
+        unannounced_row = None
+        unannounced_turn_rows: list[TranscriptTurnRecord] = []
+
+        # The unannounced call runs in its own session so retries and call records
+        # stay independent. For the user-facing report, however, it is the final
+        # result of the original announced-training session.
+        scheduled = db.scalar(
+            select(ScheduledTraining).where(
+                ScheduledTraining.source_session_id == session_id
+            )
+        )
+        if scheduled is not None:
+            final_row = None
+            if scheduled.result_session_id:
+                result_reports = db.scalars(
+                    select(TrainingReportRecord).where(
+                        TrainingReportRecord.session_id
+                        == scheduled.result_session_id
+                    )
+                ).all()
+                unannounced_row = next(
+                    (row for row in result_reports if row.source == "clawops"),
+                    None,
+                ) or next(
+                    (row for row in result_reports if row.source == "live"),
+                    None,
+                )
+                if unannounced_row is not None:
+                    result_call = _latest_call(db, scheduled.result_session_id)
+                    unannounced_turn_rows = db.scalars(
+                        select(TranscriptTurnRecord)
+                        .where(
+                            TranscriptTurnRecord.session_id
+                            == scheduled.result_session_id,
+                            TranscriptTurnRecord.source
+                            == (
+                                "clawops"
+                                if unannounced_row.source == "clawops"
+                                else "live"
+                            ),
+                        )
+                        .order_by(TranscriptTurnRecord.sequence)
+                    ).all()
+                    call = result_call or call
+                    turns = unannounced_turn_rows
+                    if draft_row is not None:
+                        final_row = _combine_reports(
+                            _report_schema(draft_row),
+                            _report_schema(unannounced_row),
+                        )
         status: ReportStatus = (
             "final"
             if final_row is not None
@@ -154,9 +206,22 @@ def get_report(session_id: str) -> GetReportResponse:
             callId=call.clawops_call_id if call is not None else None,
             status=status,
             turns=[TranscriptTurn(role=row.role, text=row.text) for row in turns],
+            draftTurns=_turn_schemas(draft_turn_rows),
+            unannouncedTurns=_turn_schemas(unannounced_turn_rows),
             draft=_report_schema(draft_row),
-            final=_report_schema(final_row),
-            clawopsSummary=final_row.clawops_summary if final_row is not None else None,
+            unannounced=_report_schema(unannounced_row),
+            final=(
+                final_row
+                if isinstance(final_row, TrainingReport)
+                else _report_schema(final_row)
+            ),
+            clawopsSummary=(
+                unannounced_row.clawops_summary
+                if unannounced_row is not None
+                else final_row.clawops_summary
+                if isinstance(final_row, TrainingReportRecord)
+                else None
+            ),
         )
 
 
@@ -282,6 +347,7 @@ async def build_draft_report(
     _save_report(session_id, report, status="draft")
     status: ReportStatus = "final" if get_report(session_id).final is not None else "draft"
     update_report_status(session_id, status)
+    _mark_source_report_ready(session_id)
     logger.info("Draft report ready session=%s turns=%s", session_id, len(turns))
     return report
 
@@ -362,9 +428,39 @@ async def build_final_report(
         call_id=call_id,
         clawops_summary=summary,
     )
-    update_report_status(session_id, "final")
+    update_report_status(
+        session_id,
+        "draft" if _has_scheduled_unannounced_training(session_id) else "final",
+    )
+    _mark_source_report_ready(session_id)
     logger.info("Final report ready session=%s call_id=%s", session_id, call_id)
     return report
+
+
+def _mark_source_report_ready(result_session_id: str) -> None:
+    """Expose a completed unannounced-session report on its source session."""
+    with SessionLocal() as db:
+        source_session_id = db.scalar(
+            select(ScheduledTraining.source_session_id).where(
+                ScheduledTraining.result_session_id == result_session_id
+            )
+        )
+    if source_session_id is not None:
+        update_report_status(source_session_id, "final")
+        logger.info(
+            "Unannounced report linked source_session=%s result_session=%s",
+            source_session_id,
+            result_session_id,
+        )
+
+
+def _has_scheduled_unannounced_training(session_id: str) -> bool:
+    with SessionLocal() as db:
+        return db.scalar(
+            select(ScheduledTraining.id).where(
+                ScheduledTraining.source_session_id == session_id
+            )
+        ) is not None
 
 
 def fetch_clawops_transcript(call_id: str) -> Any:
@@ -428,6 +524,62 @@ def _report_schema(row: TrainingReportRecord | None) -> TrainingReport | None:
             BehaviorItem.model_validate(item) for item in row.defense_behaviors
         ],
         source=row.source,
+    )
+
+
+def _turn_schemas(rows: list[TranscriptTurnRecord]) -> list[TranscriptTurn]:
+    return [TranscriptTurn(role=row.role, text=row.text) for row in rows]
+
+
+def _combine_reports(
+    announced: TrainingReport | None,
+    unannounced: TrainingReport | None,
+) -> TrainingReport | None:
+    if announced is None or unannounced is None:
+        return None
+
+    score_delta = unannounced.score - announced.score
+    if score_delta > 0:
+        change = f"불시 전화에서 {score_delta}점 향상됐어요."
+    elif score_delta < 0:
+        change = f"불시 전화에서 {abs(score_delta)}점 낮아졌어요."
+    else:
+        change = "두 통화의 대응 점수가 같았어요."
+
+    def tagged(
+        prefix: str,
+        items: list[BehaviorItem],
+    ) -> list[BehaviorItem]:
+        return [
+            BehaviorItem(label=f"{prefix} · {item.label}", evidence=item.evidence)
+            for item in items
+        ]
+
+    return TrainingReport(
+        score=round((announced.score + unannounced.score) / 2),
+        suspected=announced.suspected and unannounced.suspected,
+        gaveName=announced.gaveName or unannounced.gaveName,
+        triedHangup=announced.triedHangup and unannounced.triedHangup,
+        summary=(
+            f"1차 전화는 {announced.score}점, 불시 전화는 "
+            f"{unannounced.score}점이었습니다. {change} "
+            f"1차 분석: {announced.summary} "
+            f"불시 전화 분석: {unannounced.summary}"
+        ),
+        coaching=(
+            "두 통화에서 반복해서 지킬 수 있는 대응 습관을 만드는 것이 중요합니다. "
+            f"1차 코칭: {announced.coaching} "
+            f"불시 전화 코칭: {unannounced.coaching}"
+        ),
+        riskBehaviors=(
+            tagged("1차", announced.riskBehaviors)
+            + tagged("불시", unannounced.riskBehaviors)
+        ),
+        defenseBehaviors=(
+            tagged("1차", announced.defenseBehaviors)
+            + tagged("불시", unannounced.defenseBehaviors)
+        ),
+        source="comparison",
     )
 
 

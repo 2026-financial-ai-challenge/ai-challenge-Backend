@@ -199,3 +199,23 @@ def test_trainee_spoke_requires_user_utterance(monkeypatch):
         ),
     )
     assert call_service.trainee_spoke("ses_1")
+
+
+def test_call_had_transcript_accepts_assistant_only_call(monkeypatch):
+    from app.services import call_service
+
+    monkeypatch.setattr(
+        call_service,
+        "get_report",
+        lambda _id: SimpleNamespace(
+            turns=[SimpleNamespace(role="assistant", text="안녕하세요")]
+        ),
+    )
+    assert call_service.call_had_transcript("ses_1")
+
+    monkeypatch.setattr(
+        call_service,
+        "get_report",
+        lambda _id: SimpleNamespace(turns=[]),
+    )
+    assert not call_service.call_had_transcript("ses_1")

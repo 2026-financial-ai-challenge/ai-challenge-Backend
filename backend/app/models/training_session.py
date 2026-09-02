@@ -11,7 +11,7 @@ class TrainingSession(Base):
     __table_args__ = (
         CheckConstraint("current_training_type IN ('announced', 'unannounced')", name="ck_session_training_type"),
         CheckConstraint(
-            "call_status IS NULL OR call_status IN ('waiting', 'calling', 'completed', 'missed', 'failed')",
+            "call_status IS NULL OR call_status IN ('waiting', 'calling', 'completed', 'missed', 'silent', 'failed')",
             name="ck_session_call_status",
         ),
         CheckConstraint("report_status IS NULL OR report_status IN ('none', 'pending', 'draft', 'final', 'failed')", name="ck_session_report_status"),

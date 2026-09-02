@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.models.call import Call
+from app.models.transcript_turn import TranscriptTurnRecord
 from app.services.report_service import (
     bind_call,
     build_draft_report,
@@ -51,11 +52,41 @@ class CallInProgressError(CallServiceError):
     pass
 
 
-def trainee_spoke(session_id: str) -> bool:
+def trainee_spoke(session_id: str, call_id: str | None = None) -> bool:
+    if call_id is not None:
+        return _call_has_turn(session_id, call_id, role="user")
     return any(
         turn.role == "user" and turn.text.strip()
         for turn in get_report(session_id).turns
     )
+
+
+def call_had_transcript(session_id: str, call_id: str | None = None) -> bool:
+    if call_id is not None:
+        return _call_has_turn(session_id, call_id)
+    return any(turn.text.strip() for turn in get_report(session_id).turns)
+
+
+def _call_has_turn(
+    session_id: str,
+    call_id: str,
+    *,
+    role: str | None = None,
+) -> bool:
+    with SessionLocal() as db:
+        statement = (
+            select(TranscriptTurnRecord.id)
+            .join(Call, TranscriptTurnRecord.call_id == Call.id)
+            .where(
+                Call.session_id == session_id,
+                Call.clawops_call_id == call_id,
+                TranscriptTurnRecord.text != "",
+            )
+            .limit(1)
+        )
+        if role is not None:
+            statement = statement.where(TranscriptTurnRecord.role == role)
+        return db.scalar(statement) is not None
 
 
 def _require_env(name: str) -> str:
@@ -277,7 +308,10 @@ async def _create_outbound_call(session_id: str):
     _require_env("OPENAI_API_KEY")
 
     try:
-        scenario = await get_runtime_scenario()
+        scenario = await asyncio.wait_for(
+            get_runtime_scenario(),
+            timeout=float(os.getenv("SCENARIO_GENERATION_TIMEOUT_SEC", "20")),
+        )
     except Exception as exc:
         logger.exception("Dynamic scenario generation failed; using base scenario")
         try:
@@ -325,9 +359,10 @@ async def _create_outbound_call(session_id: str):
 async def _monitor_call(session_id: str, agent, call_session, scenario=None) -> None:
     try:
         await call_session.wait()
-        if trainee_spoke(session_id):
+        if trainee_spoke(session_id, call_session.call_id):
             update_call_status(session_id, "completed")
             _complete_call(call_session.call_id)
+            _complete_scheduled_training(session_id)
             try:
                 await asyncio.wait_for(
                     build_draft_report(session_id, scenario=scenario), timeout=20
@@ -353,14 +388,25 @@ async def _monitor_call(session_id: str, agent, call_session, scenario=None) -> 
                     "ClawOps transcript request failed: session_id=%s",
                     session_id,
                 )
+        elif call_had_transcript(session_id, call_session.call_id):
+            update_call_status(session_id, "silent")
+            _complete_call(call_session.call_id)
+            update_report_status(session_id, "none")
+            _retry_scheduled_training(session_id, "no_trainee_speech")
+            logger.info(
+                "Training call connected without trainee speech session=%s",
+                session_id,
+            )
         else:
             update_call_status(session_id, "missed")
             _fail_call(call_session.call_id, "no_answer")
             update_report_status(session_id, "none")
+            _retry_scheduled_training(session_id, "call_not_connected")
             logger.info("Training call missed session=%s", session_id)
     except Exception:
         update_call_status(session_id, "failed")
         _fail_call(call_session.call_id, "ClawOps call failed")
+        _retry_scheduled_training(session_id, "call_monitor_failed")
         logger.exception("ClawOps call failed: session_id=%s", session_id)
     finally:
         await agent.disconnect()
@@ -384,6 +430,7 @@ def start_training_calls(session_id: str, phone_number: str) -> None:
 def _run_training_call(session_id: str) -> None:
     if not _outbound_lock.acquire(timeout=20):
         update_call_status(session_id, "failed")
+        _retry_scheduled_training(session_id, "outbound_lock_timeout")
         logger.warning(
             "Previous ClawOps agent still running; skip session=%s", session_id
         )
@@ -392,6 +439,7 @@ def _run_training_call(session_id: str) -> None:
         asyncio.run(_start_and_monitor_call(session_id))
     except Exception:
         update_call_status(session_id, "failed")
+        _retry_scheduled_training(session_id, "call_start_failed")
         logger.exception("Failed to start ClawOps call: session_id=%s", session_id)
     finally:
         _outbound_lock.release()
@@ -427,3 +475,15 @@ def _outbound_phone_number(training_type: str) -> str:
     if training_type == "unannounced":
         return _require_env("CLAWOPS_UNANNOUNCED_PHONE_NUMBER")
     return _require_env("CLAWOPS_PHONE_NUMBER")
+
+
+def _complete_scheduled_training(session_id: str) -> None:
+    from app.services.training_scheduler import complete_unannounced_training
+
+    complete_unannounced_training(session_id)
+
+
+def _retry_scheduled_training(session_id: str, reason: str) -> None:
+    from app.services.training_scheduler import retry_unannounced_training
+
+    retry_unannounced_training(session_id, reason)

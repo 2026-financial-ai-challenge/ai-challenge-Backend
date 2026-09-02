@@ -69,8 +69,15 @@ def greeting_playback_seconds(text: str, *, default: float = 8.0) -> float:
     return max(5.0, min(12.0, len(compact) / 7.0 + 1.5))
 
 
+# Media websocket connects after attach() returns. Speaking into the
+# prewarm buffer dumps the whole greeting as a burst when the callee
+# answers, which warps Korean TTS into a drawn-out "오오오".
+_ANSWER_SETTLE_SECONDS = 0.8
+_FALLBACK_OPENING = "안녕하세요."
+
+
 class PhonePipelineSession(PipelineSession):
-    """Fixed opening line, greeting lock, then short scripted turns."""
+    """Fixed opening line after answer, greeting lock, then short scripted turns."""
 
     def __init__(
         self,
@@ -103,32 +110,44 @@ class PhonePipelineSession(PipelineSession):
         self._greeting_playing = bool(self._greeting)
         self._held_user_transcripts: list[str] = []
         self._greeting_unlock_task: asyncio.Task | None = None
+        self._opening_task: asyncio.Task | None = None
 
     async def attach(self, call) -> None:
         await super().attach(call)
-        if not self._greeting_playing:
+        if not self._greeting:
+            self._greeting_playing = False
             return
-        delay = greeting_playback_seconds(
-            self._opening_line or self._last_assistant_text()
-        )
-        log.info("Greeting playback lock %.1fs after attach", delay)
+        self._greeting_playing = True
+        opening = self._opening_line or _FALLBACK_OPENING
+        delay = _ANSWER_SETTLE_SECONDS + greeting_playback_seconds(opening)
+        log.info("Greeting starts after answer; lock %.1fs", delay)
         if self._greeting_unlock_task and not self._greeting_unlock_task.done():
             self._greeting_unlock_task.cancel()
+        if self._opening_task and not self._opening_task.done():
+            self._opening_task.cancel()
         self._greeting_unlock_task = asyncio.create_task(self._unlock_greeting(delay))
+        self._opening_task = asyncio.create_task(self._speak_opening_after_answer())
 
     async def stop(self) -> None:
         if self._greeting_unlock_task and not self._greeting_unlock_task.done():
             self._greeting_unlock_task.cancel()
+        if self._opening_task and not self._opening_task.done():
+            self._opening_task.cancel()
         await super().stop()
 
     async def _generate_greeting(self) -> None:
-        await asyncio.sleep(0.5)
-        if self._opening_line:
-            self._current_response_task = asyncio.create_task(
-                self._speak_fixed(self._opening_line)
-            )
+        # ClawOps prewarms during ring and would speak into a buffer that is
+        # later flushed as a burst. Opening audio starts in attach() instead.
+        return
+
+    async def _speak_opening_after_answer(self) -> None:
+        try:
+            await asyncio.sleep(_ANSWER_SETTLE_SECONDS)
+        except asyncio.CancelledError:
             return
-        await super()._generate_greeting()
+        if not self._running or not self._call:
+            return
+        await self._speak_fixed(self._opening_line or _FALLBACK_OPENING)
 
     async def _unlock_greeting(self, delay: float) -> None:
         try:

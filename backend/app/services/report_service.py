@@ -756,10 +756,11 @@ async def _ask_report_llm(
     client: Any | None,
     scenario: Any | None,
 ) -> _LlmReport:
-    from openai import AsyncOpenAI
+    from app.training.llm_config import chat_client, llm_settings
 
     risk_labels, defense_labels = _behavior_labels()
-    openai_client = client or AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    settings = llm_settings()
+    openai_client = client or chat_client(settings)
     source_note = (
         "실시간 STT라 오인식이 있을 수 있다. 확실한 것만 표시한다."
         if source == "live"
@@ -805,7 +806,7 @@ async def _ask_report_llm(
 """.strip()
 
     response = await openai_client.chat.completions.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+        model=settings.model,
         temperature=0,
         response_format={"type": "json_object"},
         messages=[

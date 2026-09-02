@@ -29,11 +29,11 @@ def get_call_scenario():
     return get_scenario(os.getenv("CALL_SCENARIO", "voice_phishing_training"))
 
 
-async def get_runtime_scenario():
+async def get_runtime_scenario(client=None, model=None):
     """Return a per-call generated scenario when dynamic mode is enabled."""
     base = get_call_scenario()
     from ai.scenarios.generator import dynamic_scenarios_enabled, generate_scenario
 
     if not dynamic_scenarios_enabled():
         return base
-    return await generate_scenario(base)
+    return await generate_scenario(base, client=client, model=model)

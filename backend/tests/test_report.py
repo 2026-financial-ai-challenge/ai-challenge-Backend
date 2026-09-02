@@ -1,15 +1,19 @@
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.main import app
 from app.database import SessionLocal
 from app.models.participant import Participant
+from app.models.scheduled_training import ScheduledTraining
+from app.models.training_session import TrainingSession
 from app.schemas.report import BehaviorItem, TrainingReport, TranscriptTurn
 from app.services import report_service
+from app.services import call_service
 from app.services.report_service import (
     append_turn,
     bind_call,
@@ -25,6 +29,10 @@ from app.services.report_service import (
     _scenario_report_note,
 )
 from app.services.session_service import create_session, reset_sessions
+from app.services.training_scheduler import (
+    process_due_scheduled_trainings,
+    schedule_unannounced_training,
+)
 from app.services.auth_service import create_access_token, hash_password
 
 
@@ -303,6 +311,79 @@ def test_draft_then_final_report(monkeypatch):
     assert stored.draft is not None
     assert stored.final is not None
     assert stored.clawopsSummary == {"topic": "account alert"}
+
+
+def test_unannounced_report_becomes_source_session_final(monkeypatch):
+    source_session_id, _headers = _authenticated_session()
+    bind_call(source_session_id, "CAannounced")
+    append_turn(source_session_id, "user", "누구세요")
+    asyncio.run(
+        build_draft_report(
+            source_session_id,
+            client=_fake_openai(_llm_payload(summary="첫 번째 통화 결과")),
+        )
+    )
+
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    schedule_unannounced_training(
+        source_session_id,
+        now=now,
+        delay_seconds=1800,
+    )
+    monkeypatch.setenv("CLAWOPS_UNANNOUNCED_PHONE_NUMBER", "07011112222")
+    monkeypatch.setattr(call_service, "start_training_calls", lambda *_args: None)
+    process_due_scheduled_trainings(now=now + timedelta(minutes=31))
+
+    with SessionLocal() as db:
+        scheduled = db.scalar(select(ScheduledTraining))
+        assert scheduled is not None
+        assert scheduled.result_session_id is not None
+        result_session_id = scheduled.result_session_id
+
+    bind_call(result_session_id, "CAunannounced")
+    append_turn(result_session_id, "assistant", "지금 바로 송금해 주세요")
+    append_turn(result_session_id, "user", "공식 번호로 확인할게요")
+    asyncio.run(
+        build_draft_report(
+            result_session_id,
+            client=_fake_openai(
+                _llm_payload(
+                    summary="불시 전화 결과",
+                    gaveName=False,
+                    riskBehaviors=[],
+                )
+            ),
+        )
+    )
+
+    combined = get_report(source_session_id)
+    assert combined.status == "final"
+    assert combined.callId == "CAunannounced"
+    assert combined.draft is not None
+    assert combined.draft.summary == "첫 번째 통화 결과"
+    assert combined.unannounced is not None
+    assert combined.unannounced.summary == "불시 전화 결과"
+    assert combined.final is not None
+    assert combined.final.source == "comparison"
+    assert combined.final.score == round(
+        (combined.draft.score + combined.unannounced.score) / 2
+    )
+    assert "1차 전화는" in combined.final.summary
+    assert "불시 전화는" in combined.final.summary
+    assert combined.draftTurns[0].text == "누구세요"
+    assert [turn.text for turn in combined.unannouncedTurns] == [
+        "지금 바로 송금해 주세요",
+        "공식 번호로 확인할게요",
+    ]
+    assert [turn.text for turn in combined.turns] == [
+        "지금 바로 송금해 주세요",
+        "공식 번호로 확인할게요",
+    ]
+
+    with SessionLocal() as db:
+        source = db.get(TrainingSession, source_session_id)
+        assert source is not None
+        assert source.report_status == "final"
 
 
 def test_get_report_api_none_then_draft(monkeypatch):

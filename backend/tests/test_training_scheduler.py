@@ -10,7 +10,9 @@ from app.services import call_service
 from app.services.auth_service import hash_password
 from app.services.session_service import create_session, reset_sessions
 from app.services.training_scheduler import (
+    complete_unannounced_training,
     process_due_scheduled_trainings,
+    retry_unannounced_training,
     schedule_unannounced_training,
 )
 
@@ -35,7 +37,7 @@ def _announced_session() -> str:
     ).id
 
 
-def test_schedules_once_between_30_minutes_and_3_hours():
+def test_schedules_once_between_30_minutes_and_1_hour():
     session_id = _announced_session()
     now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
 
@@ -104,3 +106,65 @@ def test_unannounced_call_uses_separate_originating_number(monkeypatch):
 
     assert call_service._outbound_phone_number("announced") == "07033334444"
     assert call_service._outbound_phone_number("unannounced") == "07055556666"
+
+
+def test_failed_unannounced_call_is_retried_once_then_failed(monkeypatch):
+    source_session_id = _announced_session()
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    schedule_unannounced_training(source_session_id, now=now, delay_seconds=1800)
+    monkeypatch.setenv("CLAWOPS_UNANNOUNCED_PHONE_NUMBER", "07011112222")
+    monkeypatch.setenv("UNANNOUNCED_CALL_RETRY_DELAY_SEC", "300")
+    monkeypatch.setenv("UNANNOUNCED_CALL_MAX_ATTEMPTS", "2")
+    monkeypatch.setattr(call_service, "start_training_calls", lambda *_args: None)
+
+    assert process_due_scheduled_trainings(now=now + timedelta(minutes=31)) == 1
+    with SessionLocal() as db:
+        job = db.scalar(select(ScheduledTraining))
+        assert job is not None
+        result_session_id = job.result_session_id
+        assert result_session_id is not None
+        assert job.attempt_count == 1
+
+    retry_unannounced_training(
+        result_session_id,
+        "call_not_connected",
+        now=now + timedelta(minutes=31),
+    )
+    with SessionLocal() as db:
+        job = db.scalar(select(ScheduledTraining))
+        assert job is not None
+        assert job.status == "pending"
+        assert job.last_error == "call_not_connected"
+
+    assert process_due_scheduled_trainings(now=now + timedelta(hours=2)) == 1
+    retry_unannounced_training(
+        result_session_id,
+        "call_not_connected",
+        now=now + timedelta(hours=2),
+    )
+    with SessionLocal() as db:
+        job = db.scalar(select(ScheduledTraining))
+        assert job is not None
+        assert job.status == "failed"
+        assert job.attempt_count == 2
+
+
+def test_completed_unannounced_call_marks_job_completed(monkeypatch):
+    source_session_id = _announced_session()
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    schedule_unannounced_training(source_session_id, now=now, delay_seconds=1800)
+    monkeypatch.setenv("CLAWOPS_UNANNOUNCED_PHONE_NUMBER", "07011112222")
+    monkeypatch.setattr(call_service, "start_training_calls", lambda *_args: None)
+
+    process_due_scheduled_trainings(now=now + timedelta(minutes=31))
+    with SessionLocal() as db:
+        job = db.scalar(select(ScheduledTraining))
+        assert job is not None and job.result_session_id is not None
+        result_session_id = job.result_session_id
+
+    complete_unannounced_training(result_session_id, now=now + timedelta(minutes=32))
+    with SessionLocal() as db:
+        job = db.scalar(select(ScheduledTraining))
+        assert job is not None
+        assert job.status == "completed"
+        assert job.completed_at is not None

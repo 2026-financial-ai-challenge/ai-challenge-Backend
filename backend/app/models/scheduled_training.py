@@ -14,7 +14,7 @@ class ScheduledTraining(Base):
             name="ck_scheduled_training_type",
         ),
         CheckConstraint(
-            "status IN ('pending', 'started', 'cancelled')",
+            "status IN ('pending', 'started', 'completed', 'failed', 'cancelled')",
             name="ck_scheduled_training_status",
         ),
     )
@@ -43,6 +43,13 @@ class ScheduledTraining(Base):
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     source_session: Mapped["TrainingSession"] = relationship(
         foreign_keys=[source_session_id]

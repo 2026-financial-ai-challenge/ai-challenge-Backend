@@ -17,7 +17,7 @@ class TrainingReport(BaseModel):
     coaching: str
     riskBehaviors: list[BehaviorItem] = Field(default_factory=list)
     defenseBehaviors: list[BehaviorItem] = Field(default_factory=list)
-    source: Literal["live", "clawops"]
+    source: Literal["live", "clawops", "comparison"]
 
 
 class TranscriptTurn(BaseModel):
@@ -30,6 +30,9 @@ class GetReportResponse(BaseModel):
     callId: str | None = None
     status: Literal["none", "pending", "draft", "final", "failed"]
     turns: list[TranscriptTurn] = Field(default_factory=list)
+    draftTurns: list[TranscriptTurn] = Field(default_factory=list)
+    unannouncedTurns: list[TranscriptTurn] = Field(default_factory=list)
     draft: TrainingReport | None = None
+    unannounced: TrainingReport | None = None
     final: TrainingReport | None = None
     clawopsSummary: dict[str, Any] | None = None

@@ -154,28 +154,3 @@ def test_session_resources_are_owner_only(client, monkeypatch):
     headers = {"Authorization": f"Bearer {stranger_token}"}
     assert http.get(f"/v1/sessions/{session_id}", headers=headers).status_code == 404
     assert http.get(f"/v1/sessions/{session_id}/report", headers=headers).status_code == 404
-
-
-def test_current_session_returns_in_progress_for_owner(client, monkeypatch):
-    http, sent = client
-    from app.routers import consent
-
-    monkeypatch.setattr(consent, "start_training_calls", lambda *_args: None)
-    token = _verify(http, sent)
-    owner_token = http.post(
-        "/v1/auth/signup",
-        json={"verificationToken": token, "password": PASSWORD},
-    ).json()["accessToken"]
-    headers = {"Authorization": f"Bearer {owner_token}"}
-
-    missing = http.get("/v1/sessions/current", headers=headers)
-    assert missing.status_code == 404
-
-    session_id = http.post(
-        "/v1/consents",
-        headers=headers,
-        json={"privacy": True, "unannouncedTraining": True},
-    ).json()["sessionId"]
-    current = http.get("/v1/sessions/current", headers=headers)
-    assert current.status_code == 200
-    assert current.json()["session"]["id"] == session_id

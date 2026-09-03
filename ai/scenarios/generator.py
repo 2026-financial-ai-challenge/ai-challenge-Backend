@@ -268,10 +268,9 @@ async def review_scenario(
     scenario: GeneratedScenario,
     *,
     client: AsyncOpenAI,
-    model: str | None = None,
 ) -> ScenarioReview:
     response = await client.chat.completions.create(
-        model=model or os.getenv("SCENARIO_REVIEW_MODEL", "gpt-4o-mini"),
+        model=os.getenv("SCENARIO_REVIEW_MODEL", "gpt-4o-mini"),
         temperature=0,
         max_tokens=600,
         response_format={"type": "json_object"},
@@ -356,10 +355,9 @@ async def _request_scenario_json(
     *,
     client: AsyncOpenAI,
     repair_hint: str = "",
-    model: str | None = None,
 ) -> str:
     response = await client.chat.completions.create(
-        model=model or os.getenv("SCENARIO_GENERATOR_MODEL", "gpt-4o-mini"),
+        model=os.getenv("SCENARIO_GENERATOR_MODEL", "gpt-4o-mini"),
         messages=[
             {"role": "system", "content": "너는 안전한 교육용 통화 시나리오 설계자다."},
             {"role": "user", "content": _planner_prompt(base, repair_hint=repair_hint)},
@@ -376,12 +374,7 @@ def _review_is_usable(review: ScenarioReview) -> bool:
     return review.valid and review.score >= 80
 
 
-async def generate_scenario(
-    base: Scenario,
-    *,
-    client: AsyncOpenAI | None = None,
-    model: str | None = None,
-) -> Scenario:
+async def generate_scenario(base: Scenario, *, client: AsyncOpenAI | None = None) -> Scenario:
     """Generate, validate, and review a scenario for one outbound call.
 
     A scenario that fails review (score < 80, or the review call itself
@@ -403,12 +396,12 @@ async def generate_scenario(
     for attempt in range(1, MAX_GENERATE_ATTEMPTS + 1):
         try:
             content = await _request_scenario_json(
-                base, client=openai_client, repair_hint=repair_hint, model=model
+                base, client=openai_client, repair_hint=repair_hint
             )
             generated = GeneratedScenario.model_validate(json.loads(content))
             _validate_safe_text(generated)
             _validate_structure(generated)
-            review = await review_scenario(generated, client=openai_client, model=model)
+            review = await review_scenario(generated, client=openai_client)
             if not _review_is_usable(review):
                 details = "; ".join(review.issues) or "score below 80-point bar"
                 raise ValueError(

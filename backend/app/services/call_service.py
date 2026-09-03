@@ -25,11 +25,6 @@ from app.services.session_service import (
     update_call_status,
     update_report_status,
 )
-from app.training.llm_config import (
-    LlmConfigurationError,
-    apply_clawops_openai_compat_env,
-    chat_client,
-)
 from app.training.scenarios import get_runtime_scenario
 
 
@@ -55,9 +50,6 @@ class CallConfigurationError(CallServiceError):
 
 class CallInProgressError(CallServiceError):
     pass
-
-
-_MISSED_STATUSES = frozenset({"no-answer", "busy", "rejected", "canceled"})
 
 
 def trainee_spoke(session_id: str, call_id: str | None = None) -> bool:
@@ -95,30 +87,6 @@ def _call_has_turn(
         if role is not None:
             statement = statement.where(TranscriptTurnRecord.role == role)
         return db.scalar(statement) is not None
-
-
-def classify_finished_call(call_session, *, spoke: bool) -> str:
-    """Map ClawOps end state to a coarse outcome.
-
-    `completed` here means the callee picked up. `_monitor_call` then splits
-    that into training `completed` (trainee spoke) vs `silent`.
-    """
-    raw = (
-        getattr(call_session, "ended_status", None)
-        or getattr(call_session, "status", "")
-        or ""
-    )
-    status = str(raw).replace("_", "-").lower()
-    if status in _MISSED_STATUSES:
-        return "missed"
-    if status == "failed":
-        return "failed"
-    if status == "completed" or spoke:
-        return "completed"
-    duration = getattr(call_session, "ended_duration", None)
-    if isinstance(duration, (int, float)) and duration > 0:
-        return "completed"
-    return "missed"
 
 
 def _require_env(name: str) -> str:
@@ -198,9 +166,12 @@ def phone_system_prompt(scenario) -> str:
 
 def build_pipeline_session(scenario):
     try:
-        from clawops.agent.pipeline import DeepgramSTT, OpenAILLM
+        from clawops.agent.pipeline import (
+            DeepgramSTT,
+            ElevenLabsTTS,
+            OpenAILLM,
+        )
         from app.training.deepgram_stt import PhoneDeepgramSTT
-        from app.training.elevenlabs_tts import PhoneElevenLabsTTS
         from app.training.pipeline_session import PhonePipelineSession
     except ImportError as exc:
         raise CallConfigurationError(
@@ -210,8 +181,10 @@ def build_pipeline_session(scenario):
 
     voice_id = _tts_voice_id(scenario)
 
-    # HTTP TTS (PhoneElevenLabsTTS) accepts style/speed; ClawOps' websocket
-    # ElevenLabsTTS silently dropped them and stretched Korean vowels.
+    # Built separately so we can see which naturalness settings the installed
+    # ClawOps ElevenLabsTTS actually accepts. _supported_kwargs() drops unknown
+    # ones silently, which would otherwise make a voice-tuning change look
+    # applied when it never reached ElevenLabs.
     tts_requested = dict(
         voice_id=voice_id,
         model=os.getenv("ELEVENLABS_MODEL_ID", "eleven_turbo_v2_5").strip()
@@ -223,15 +196,15 @@ def build_pipeline_session(scenario):
         speed=_tts_speed(scenario),
         language_code="ko",
     )
-    tts_kwargs = _supported_kwargs(PhoneElevenLabsTTS, **tts_requested)
+    tts_kwargs = _supported_kwargs(ElevenLabsTTS, **tts_requested)
     dropped = sorted(set(tts_requested) - set(tts_kwargs))
     if dropped:
         logger.warning(
-            "PhoneElevenLabsTTS ignored unsupported voice settings: %s",
+            "ElevenLabsTTS ignored unsupported voice settings: %s "
+            "(the installed clawops build does not accept them)",
             ", ".join(dropped),
         )
 
-    settings = apply_clawops_openai_compat_env()
     session_kwargs = _supported_kwargs(
         PhonePipelineSession,
         system_prompt=phone_system_prompt(scenario),
@@ -247,8 +220,7 @@ def build_pipeline_session(scenario):
         llm=OpenAILLM(
             **_supported_kwargs(
                 OpenAILLM,
-                api_key=settings.api_key,
-                model=settings.model,
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
                 # Raised from 0.55. At the old value the caller reused the same
                 # phrasing turn after turn, which reads as scripted. This matches
                 # ai/llm_stream.py's default so the phone pipeline and the local
@@ -257,7 +229,7 @@ def build_pipeline_session(scenario):
                 max_tokens=180,
             )
         ),
-        tts=PhoneElevenLabsTTS(**tts_kwargs),
+        tts=ElevenLabsTTS(**tts_kwargs),
         greeting=True,
         opening_line=scenario.opening_line,
         max_turns=scenario.max_turns,
@@ -333,17 +305,11 @@ async def _create_outbound_call(session_id: str):
     _require_env("CLAWOPS_API_KEY")
     _require_env("CLAWOPS_ACCOUNT_ID")
     from_number = _outbound_phone_number(session.currentTrainingType)
-    try:
-        settings = apply_clawops_openai_compat_env()
-    except LlmConfigurationError as exc:
-        raise CallConfigurationError(str(exc)) from exc
+    _require_env("OPENAI_API_KEY")
 
     try:
         scenario = await asyncio.wait_for(
-            get_runtime_scenario(
-                client=chat_client(settings),
-                model=settings.model,
-            ),
+            get_runtime_scenario(),
             timeout=float(os.getenv("SCENARIO_GENERATION_TIMEOUT_SEC", "20")),
         )
     except Exception as exc:
@@ -356,11 +322,9 @@ async def _create_outbound_call(session_id: str):
             raise CallConfigurationError(str(fallback_exc)) from fallback_exc
 
     logger.info(
-        "Starting pipeline call session=%s scenario=%s llm=%s/%s",
+        "Starting pipeline call session=%s scenario=%s",
         session_id,
         scenario.id,
-        settings.provider,
-        settings.model,
     )
 
     agent = (
@@ -395,19 +359,7 @@ async def _create_outbound_call(session_id: str):
 async def _monitor_call(session_id: str, agent, call_session, scenario=None) -> None:
     try:
         await call_session.wait()
-        spoke = trainee_spoke(session_id, call_session.call_id)
-        had_transcript = call_had_transcript(session_id, call_session.call_id)
-        outcome = classify_finished_call(call_session, spoke=spoke)
-        logger.info(
-            "Training call ended session=%s outcome=%s ended_status=%s duration=%s spoke=%s transcript=%s",
-            session_id,
-            outcome,
-            getattr(call_session, "ended_status", None),
-            getattr(call_session, "ended_duration", None),
-            spoke,
-            had_transcript,
-        )
-        if spoke:
+        if trainee_spoke(session_id, call_session.call_id):
             update_call_status(session_id, "completed")
             _complete_call(call_session.call_id)
             _complete_scheduled_training(session_id)
@@ -436,12 +388,7 @@ async def _monitor_call(session_id: str, agent, call_session, scenario=None) -> 
                     "ClawOps transcript request failed: session_id=%s",
                     session_id,
                 )
-        elif outcome == "failed":
-            update_call_status(session_id, "failed")
-            _fail_call(call_session.call_id, "ClawOps call failed")
-            update_report_status(session_id, "none")
-            _retry_scheduled_training(session_id, "call_failed")
-        elif had_transcript or outcome == "completed":
+        elif call_had_transcript(session_id, call_session.call_id):
             update_call_status(session_id, "silent")
             _complete_call(call_session.call_id)
             update_report_status(session_id, "none")

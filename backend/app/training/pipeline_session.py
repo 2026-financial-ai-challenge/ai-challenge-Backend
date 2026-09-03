@@ -69,15 +69,8 @@ def greeting_playback_seconds(text: str, *, default: float = 8.0) -> float:
     return max(5.0, min(12.0, len(compact) / 7.0 + 1.5))
 
 
-# Media websocket connects after attach() returns. Speaking into the
-# prewarm buffer dumps the whole greeting as a burst when the callee
-# answers, which warps Korean TTS into a drawn-out "오오오".
-_ANSWER_SETTLE_SECONDS = 0.8
-_FALLBACK_OPENING = "안녕하세요."
-
-
 class PhonePipelineSession(PipelineSession):
-    """Fixed opening line after answer, greeting lock, then short scripted turns."""
+    """Fixed opening line, greeting lock, then short scripted turns."""
 
     def __init__(
         self,
@@ -110,61 +103,32 @@ class PhonePipelineSession(PipelineSession):
         self._greeting_playing = bool(self._greeting)
         self._held_user_transcripts: list[str] = []
         self._greeting_unlock_task: asyncio.Task | None = None
-        self._opening_task: asyncio.Task | None = None
 
     async def attach(self, call) -> None:
         await super().attach(call)
-        if not self._greeting:
-            self._greeting_playing = False
+        if not self._greeting_playing:
             return
-        self._greeting_playing = True
-        opening = self._opening_line or _FALLBACK_OPENING
-        delay = _ANSWER_SETTLE_SECONDS + greeting_playback_seconds(opening)
-        log.info("Greeting starts after answer; lock %.1fs", delay)
+        delay = greeting_playback_seconds(
+            self._opening_line or self._last_assistant_text()
+        )
+        log.info("Greeting playback lock %.1fs after attach", delay)
         if self._greeting_unlock_task and not self._greeting_unlock_task.done():
             self._greeting_unlock_task.cancel()
-        if self._opening_task and not self._opening_task.done():
-            self._opening_task.cancel()
         self._greeting_unlock_task = asyncio.create_task(self._unlock_greeting(delay))
-        self._opening_task = asyncio.create_task(self._speak_opening_after_answer())
 
     async def stop(self) -> None:
         if self._greeting_unlock_task and not self._greeting_unlock_task.done():
             self._greeting_unlock_task.cancel()
-        if self._opening_task and not self._opening_task.done():
-            self._opening_task.cancel()
         await super().stop()
 
     async def _generate_greeting(self) -> None:
-        # ClawOps prewarms during ring and would speak into a buffer that is
-        # later flushed as a burst. Opening audio starts in attach() instead.
-        return
-
-    async def _speak_opening_after_answer(self) -> None:
-        opening = self._opening_line or _FALLBACK_OPENING
-        render = asyncio.create_task(self._render_tts_pcm(opening))
-        try:
-            await asyncio.sleep(_ANSWER_SETTLE_SECONDS)
-            pcm = await render
-        except asyncio.CancelledError:
-            render.cancel()
+        await asyncio.sleep(0.5)
+        if self._opening_line:
+            self._current_response_task = asyncio.create_task(
+                self._speak_fixed(self._opening_line)
+            )
             return
-        if not self._running or not self._call:
-            return
-        await self._play_pcm16(pcm, spoken=opening)
-
-    async def _render_tts_pcm(self, text: str) -> bytes:
-        spoken = text.strip()
-        if not spoken:
-            return b""
-
-        async def sentences() -> AsyncIterator[str]:
-            yield spoken
-
-        parts: list[bytes] = []
-        async for audio in self._tts.synthesize(sentences()):
-            parts.append(audio)
-        return b"".join(parts)
+        await super()._generate_greeting()
 
     async def _unlock_greeting(self, delay: float) -> None:
         try:
@@ -237,39 +201,26 @@ class PhonePipelineSession(PipelineSession):
             if hang_up_after:
                 await self._hang_up()
             return
-        pcm = await self._render_tts_pcm(spoken)
-        await self._play_pcm16(pcm, spoken=spoken, hang_up_after=hang_up_after)
-
-    async def _play_pcm16(
-        self,
-        pcm: bytes,
-        *,
-        spoken: str,
-        hang_up_after: bool = False,
-    ) -> None:
-        if not pcm or not self._call:
-            if hang_up_after:
-                await self._hang_up()
-            return
         try:
+
+            async def sentences() -> AsyncIterator[str]:
+                yield spoken
+
             tts_sample_rate = getattr(self._tts, "sample_rate", 24000)
             self._sent_audio_chunks = 0
-            pcm8k = resample_pcm16(pcm, from_rate=tts_sample_rate, to_rate=8000)
-            ulaw = pcm16_to_ulaw(pcm8k)
-            if not self._first_audio_logged:
-                from clawops.agent.pipeline._buffering_call import (
-                    log_first_realtime_audio,
-                )
-
-                log_first_realtime_audio(self._call)
-                self._first_audio_logged = True
-            # 20 ms at 8 kHz µ-law. Send framed so the media path is not
-            # handed the whole greeting as one burst.
-            frame = 160
-            for offset in range(0, len(ulaw), frame):
+            async for audio in self._tts.synthesize(sentences()):
                 if not self._running or not self._call:
                     break
-                await self._call.send_audio(ulaw[offset : offset + frame])
+                pcm8k = resample_pcm16(audio, from_rate=tts_sample_rate, to_rate=8000)
+                ulaw = pcm16_to_ulaw(pcm8k)
+                if not self._first_audio_logged:
+                    from clawops.agent.pipeline._buffering_call import (
+                        log_first_realtime_audio,
+                    )
+
+                    log_first_realtime_audio(self._call)
+                    self._first_audio_logged = True
+                await self._call.send_audio(ulaw)
                 self._sent_audio_chunks += 1
             log.info("Assistant: %s", spoken[:100])
             if self._call:

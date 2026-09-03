@@ -3,7 +3,7 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.14.2
 click==8.4.2
-clawops[agent,openai,deepgram,elevenlabs]==0.46.1
+clawops[agent,openai,gemini,deepgram,elevenlabs]==0.46.1
 fastapi==0.141.1
 h11==0.16.0
 httptools==0.8.0

@@ -100,6 +100,24 @@ def _require_env(name: str) -> str:
     return cleaned
 
 
+def _call_llm_provider() -> str:
+    """Which LLM answers the trainee during the live call.
+
+    'openai' (default) or 'gemini'. Independent from SCENARIO_LLM_PROVIDER
+    (ai/scenarios/generator.py) — that one only writes the scenario before
+    the call starts; this one drives in-call responses, so a quota-exhausted
+    OpenAI key can be swapped out for both without touching the other.
+    """
+    return os.getenv("CALL_LLM_PROVIDER", "openai").strip().lower() or "openai"
+
+
+def _require_call_llm_key() -> None:
+    if _call_llm_provider() == "gemini":
+        _require_env("GEMINI_API_KEY")
+    else:
+        _require_env("OPENAI_API_KEY")
+
+
 def _supported_kwargs(cls, **kwargs):
     params = inspect.signature(cls).parameters
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
@@ -169,6 +187,7 @@ def build_pipeline_session(scenario):
         from clawops.agent.pipeline import (
             DeepgramSTT,
             ElevenLabsTTS,
+            GeminiLLM,
             OpenAILLM,
         )
         from app.training.deepgram_stt import PhoneDeepgramSTT
@@ -176,7 +195,7 @@ def build_pipeline_session(scenario):
     except ImportError as exc:
         raise CallConfigurationError(
             "ClawOps pipeline extras are missing; rebuild with "
-            "clawops[agent,openai,deepgram,elevenlabs]"
+            "clawops[agent,openai,gemini,deepgram,elevenlabs]"
         ) from exc
 
     voice_id = _tts_voice_id(scenario)
@@ -217,16 +236,30 @@ def build_pipeline_session(scenario):
                 utterance_end_ms=int(os.getenv("STT_UTTERANCE_END_MS", "1200")),
             )
         ),
-        llm=OpenAILLM(
-            **_supported_kwargs(
-                OpenAILLM,
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
-                # Raised from 0.55. At the old value the caller reused the same
-                # phrasing turn after turn, which reads as scripted. This matches
-                # ai/llm_stream.py's default so the phone pipeline and the local
-                # ai/ pipeline behave the same way.
-                temperature=0.75,
-                max_tokens=180,
+        llm=(
+            GeminiLLM(
+                **_supported_kwargs(
+                    GeminiLLM,
+                    api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
+                    model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+                    or "gemini-3.5-flash-lite",
+                    temperature=0.75,
+                    max_tokens=180,
+                )
+            )
+            if _call_llm_provider() == "gemini"
+            else OpenAILLM(
+                **_supported_kwargs(
+                    OpenAILLM,
+                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+                    or "gpt-4o-mini",
+                    # Raised from 0.55. At the old value the caller reused the same
+                    # phrasing turn after turn, which reads as scripted. This matches
+                    # ai/llm_stream.py's default so the phone pipeline and the local
+                    # ai/ pipeline behave the same way.
+                    temperature=0.75,
+                    max_tokens=180,
+                )
             )
         ),
         tts=ElevenLabsTTS(**tts_kwargs),
@@ -264,25 +297,37 @@ def _pipeline_configured() -> bool:
 
 
 def _make_realtime_agent(from_number: str, scenario):
+    provider = _call_llm_provider()
     try:
-        from clawops.agent import ClawOpsAgent, OpenAIRealtime
+        if provider == "gemini":
+            from clawops.agent import ClawOpsAgent, GeminiRealtime
+        else:
+            from clawops.agent import ClawOpsAgent, OpenAIRealtime
     except ImportError as exc:
         raise CallConfigurationError(
-            "ClawOps OpenAI Realtime dependencies are missing; rebuild the backend image"
+            "ClawOps Realtime dependencies are missing; rebuild the backend image "
+            "with clawops[agent,openai,gemini]"
         ) from exc
 
     logger.warning(
         "DEEPGRAM_API_KEY or ELEVENLABS_API_KEY is missing; "
-        "falling back to OpenAI Realtime"
+        "falling back to %s Realtime",
+        provider,
     )
-    return ClawOpsAgent(
-        from_=from_number,
-        session=OpenAIRealtime(
+    if provider == "gemini":
+        session = GeminiRealtime(
+            api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
+            system_prompt=scenario.system_prompt,
+            voice=os.getenv("CLAWOPS_GEMINI_VOICE", "Kore"),
+            language="ko",
+        )
+    else:
+        session = OpenAIRealtime(
             system_prompt=scenario.system_prompt,
             voice=os.getenv("CLAWOPS_VOICE", "marin"),
             language="ko",
-        ),
-    )
+        )
+    return ClawOpsAgent(from_=from_number, session=session)
 
 
 async def start_outbound_call(session_id: str) -> str:
@@ -305,7 +350,7 @@ async def _create_outbound_call(session_id: str):
     _require_env("CLAWOPS_API_KEY")
     _require_env("CLAWOPS_ACCOUNT_ID")
     from_number = _outbound_phone_number(session.currentTrainingType)
-    _require_env("OPENAI_API_KEY")
+    _require_call_llm_key()
 
     try:
         scenario = await asyncio.wait_for(

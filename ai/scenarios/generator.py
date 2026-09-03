@@ -12,7 +12,12 @@ from typing import Any
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from ai.config import openai_api_key
+from ai.config import (
+    GEMINI_OPENAI_BASE_URL,
+    gemini_api_key,
+    openai_api_key,
+    scenario_llm_provider,
+)
 from ai.safety import SAFETY_RULES
 from ai.scenarios.types import Scenario
 from ai.voices import Onyu
@@ -21,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 GUIDELINES_PATH = Path(__file__).with_name("scenario_generation_guidelines.md")
 MAX_GENERATE_ATTEMPTS = 3
+_DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    # Non-"lite"/non-"3.x" Gemini flash models spend hundreds of hidden
+    # reasoning tokens before any visible output (measured: 28-85s latency,
+    # sometimes empty content). flash-lite skips that and answers in ~1s.
+    "gemini": "gemini-3.5-flash-lite",
+}
 _DIFFICULTY_ALIASES = {
     "하": "하",
     "중": "중",
@@ -123,6 +135,43 @@ class ScenarioReview(BaseModel):
     score: int = Field(ge=0, le=100)
     issues: list[str] = Field(default_factory=list, max_length=8)
     suggestions: list[str] = Field(default_factory=list, max_length=8)
+
+
+def _build_client() -> AsyncOpenAI:
+    provider = scenario_llm_provider()
+    if provider == "gemini":
+        # Gemini's OpenAI-compatible endpoint accepts the same chat.completions
+        # calls (including response_format={"type": "json_object"}) this module
+        # already makes, so no other code here needs to change.
+        return AsyncOpenAI(api_key=gemini_api_key(), base_url=GEMINI_OPENAI_BASE_URL)
+    if provider == "openai":
+        return AsyncOpenAI(api_key=openai_api_key())
+    raise ValueError(
+        f"Unknown SCENARIO_LLM_PROVIDER={provider!r} (expected 'openai' or 'gemini')"
+    )
+
+
+def _resolve_model(env_name: str) -> str:
+    provider = scenario_llm_provider()
+    default = _DEFAULT_MODELS.get(provider, "gpt-4o-mini")
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return default
+    if provider == "gemini" and raw.lower().startswith("gpt"):
+        # .env commonly pins SCENARIO_GENERATOR_MODEL/SCENARIO_REVIEW_MODEL to an
+        # OpenAI model name. Sending that to Gemini would just 404, so fall back
+        # to the Gemini default instead of forcing every switch to also edit
+        # those two vars.
+        logger.warning(
+            "%s=%s looks like an OpenAI model but SCENARIO_LLM_PROVIDER=gemini; "
+            "using %s instead. Set %s to a Gemini model name to override.",
+            env_name,
+            raw,
+            default,
+            env_name,
+        )
+        return default
+    return raw
 
 
 def dynamic_scenarios_enabled() -> bool:
@@ -270,7 +319,7 @@ async def review_scenario(
     client: AsyncOpenAI,
 ) -> ScenarioReview:
     response = await client.chat.completions.create(
-        model=os.getenv("SCENARIO_REVIEW_MODEL", "gpt-4o-mini"),
+        model=_resolve_model("SCENARIO_REVIEW_MODEL"),
         temperature=0,
         max_tokens=600,
         response_format={"type": "json_object"},
@@ -357,7 +406,7 @@ async def _request_scenario_json(
     repair_hint: str = "",
 ) -> str:
     response = await client.chat.completions.create(
-        model=os.getenv("SCENARIO_GENERATOR_MODEL", "gpt-4o-mini"),
+        model=_resolve_model("SCENARIO_GENERATOR_MODEL"),
         messages=[
             {"role": "system", "content": "너는 안전한 교육용 통화 시나리오 설계자다."},
             {"role": "user", "content": _planner_prompt(base, repair_hint=repair_hint)},
@@ -389,7 +438,7 @@ async def generate_scenario(base: Scenario, *, client: AsyncOpenAI | None = None
     # .env..."), instead of a bare KeyError that only avoided happening
     # before because some other module happened to import ai.config first
     # and load .env as a side effect.
-    openai_client = client or AsyncOpenAI(api_key=openai_api_key())
+    openai_client = client or _build_client()
     last_error: Exception | None = None
     repair_hint = ""
 

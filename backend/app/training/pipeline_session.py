@@ -11,6 +11,11 @@ from collections.abc import AsyncIterator
 from clawops.agent._audio import pcm16_to_ulaw, resample_pcm16
 from clawops.agent.pipeline import PipelineSession, SpeechEvent
 
+from app.training.scenarios import ensure_ai_importable
+
+ensure_ai_importable()
+from ai.scenarios.reflex import ReflexTable  # noqa: E402
+
 
 log = logging.getLogger("clawops.agent.pipeline")
 
@@ -20,6 +25,10 @@ _DIGIT_NOISE = re.compile(r"^[0-9\s]+$")
 _HANG_UP = re.compile(
     r"(끊겠|끊을게|끊을게요|끊습니다|전화 끊|나중에 걸|그만하세요|그만 전화)"
 )
+# Used only when a scenario ships no hangup_line of its own. The old
+# hardcoded line quoted one scenario's amount ("삼십만 원"), which was wrong
+# for every other scenario in the library.
+_DEFAULT_HANGUP_LINE = "지금 끊으시면 이 건은 그대로 넘어갑니다."
 
 
 def compact_speech(text: str) -> str:
@@ -85,6 +94,9 @@ class PhonePipelineSession(PipelineSession):
         recorder=None,
         opening_line: str = "",
         max_turns: int = 6,
+        quick_replies: tuple[tuple[str, str], ...] = (),
+        reflex_budget: int = 3,
+        hangup_line: str = "",
     ) -> None:
         super().__init__(
             stt=stt,
@@ -103,6 +115,8 @@ class PhonePipelineSession(PipelineSession):
         self._greeting_playing = bool(self._greeting)
         self._held_user_transcripts: list[str] = []
         self._greeting_unlock_task: asyncio.Task | None = None
+        self._hangup_line = hangup_line.strip() or _DEFAULT_HANGUP_LINE
+        self._reflexes = ReflexTable(quick_replies, budget=reflex_budget)
 
     async def attach(self, call) -> None:
         await super().attach(call)
@@ -188,11 +202,20 @@ class PhonePipelineSession(PipelineSession):
             max_turns=self._max_turns,
         ):
             self._messages.append({"role": "user", "content": text})
-            await self._speak_fixed(
-                "지금 끊으시면 그 삼십만 원 건이 그대로 넘어갑니다.",
-                hang_up_after=True,
-            )
+            await self._speak_fixed(self._hangup_line, hang_up_after=True)
             return
+
+        # Fast path: a handful of trainee lines ("안 들려요", "누구세요?") have
+        # an answer the scenario already fixes, so answering from the table
+        # skips the whole LLM round trip before the first TTS byte. Budgeted
+        # and one-shot per trigger, so the call stays LLM-driven.
+        reflex = self._reflexes.take(text)
+        if reflex:
+            log.info("Reflex reply (no LLM): %s", reflex[:40])
+            self._messages.append({"role": "user", "content": text})
+            await self._speak_fixed(reflex)
+            return
+
         await super()._handle_final_transcript(event)
 
     async def _speak_fixed(self, text: str, *, hang_up_after: bool = False) -> None:

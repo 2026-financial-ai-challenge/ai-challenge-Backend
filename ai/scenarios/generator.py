@@ -175,7 +175,16 @@ def _resolve_model(env_name: str) -> str:
 
 
 def dynamic_scenarios_enabled() -> bool:
-    return os.getenv("DYNAMIC_SCENARIO", "true").strip().lower() in {
+    """Whether to write a fresh scenario with an LLM before each call.
+
+    Off by default. Generating a scenario costs one generate call plus one
+    review call, retried up to MAX_GENERATE_ATTEMPTS times, and the caller
+    waits for all of it before the phone even rings. The fixed library in
+    ai/scenarios/library.py covers the same ground with no round trips, so
+    this is now opt-in for authoring new scenario material rather than
+    something every training call pays for.
+    """
+    return os.getenv("DYNAMIC_SCENARIO", "false").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -380,6 +389,11 @@ def _to_scenario(base: Scenario, generated: GeneratedScenario) -> Scenario:
 - 같은 표현을 반복하지 마라. 매 응답마다 어휘와 문장 구조를 바꿔라.
 - "음", "아", "그러니까" 같은 자연스러운 구어체 접속어를 필요할 때 섞어 써라.
 """
+    # quick_replies and hangup_line are deliberately left empty. Both are
+    # fixed sentences tied to one specific event, and a generated scenario
+    # invents a new event every call, so carrying the base scenario's canned
+    # lines over would contradict what the caller is actually talking about.
+    # Dynamic calls therefore route every turn through the LLM.
     return Scenario(
         id=f"{base.id}:dynamic",
         name=generated.name,

@@ -25,3 +25,9 @@ class Scenario:
     tactics: tuple[str, ...] = ()
     red_flags: tuple[str, ...] = ()
     ideal_trainee_response: str | None = None
+    # (trigger name from ai.scenarios.reflex, canned reply). The live pipeline
+    # answers these without an LLM round trip -- see ai/scenarios/reflex.py.
+    quick_replies: tuple[tuple[str, str], ...] = ()
+    # Last line before hanging up on a second "I'm hanging up". Kept on the
+    # scenario so the phone pipeline stops hardcoding one scenario's amount.
+    hangup_line: str = ""

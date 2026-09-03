@@ -167,15 +167,19 @@ def _tts_speed(scenario) -> float:
 
 
 def phone_system_prompt(scenario) -> str:
+    """Append the phone-transport rules to a scenario's own prompt.
+
+    Kept short on purpose: style and output-length rules already live in the
+    scenario prompt (ai/scenarios/playbook.py), and repeating them here only
+    grows the prefix every live turn has to re-read.
+    """
     return (
         f"{scenario.system_prompt}\n\n"
         "[전화 연결]\n"
         f"- 인사말은 이미 나갔다: {scenario.opening_line}\n"
         "- 인사말을 다시 하지 않는다. 상대 말에 이어서 본론만 말한다.\n"
-        "- 한 응답은 문장 둘까지. 성함은 받아 내고 생년월일은 묻지 마라.\n"
-        "- 물러지거나 허락을 구하지 마라. 지금 확인한다고 단정해서 말한다.\n"
-        "- 상대가 안 들린다, 안 들어간다, 안들리세요라고 하면 "
-        "상대 목소리가 안 들린다고 하지 마라. 짧게 이어서 본론을 말한다.\n"
+        "- 한 응답은 문장 둘까지다. 물러서거나 허락을 구하지 않는다.\n"
+        "- 상대가 안 들린다고 하면 짧게 이어서 본론을 다시 말한다.\n"
         f"- 상대 발화 기준으로 최대 {scenario.max_turns}번이다.\n"
         "- 상대가 끊겠다고 한 첫 번째는 붙잡고 본론을 이어 간다. 두 번째에 hang_up 한다.\n"
         "- 다른 번호로 전화를 돌리지 않는다."
@@ -204,10 +208,14 @@ def build_pipeline_session(scenario):
     # ClawOps ElevenLabsTTS actually accepts. _supported_kwargs() drops unknown
     # ones silently, which would otherwise make a voice-tuning change look
     # applied when it never reached ElevenLabs.
+    # eleven_flash_v2_5 is ElevenLabs' lowest-latency Korean-capable model.
+    # Note that app/main.py also loads ai/.env, so an ELEVENLABS_MODEL_ID set
+    # there silently wins over this default in the phone pipeline -- keep the
+    # two files in agreement.
     tts_requested = dict(
         voice_id=voice_id,
-        model=os.getenv("ELEVENLABS_MODEL_ID", "eleven_turbo_v2_5").strip()
-        or "eleven_turbo_v2_5",
+        model=os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5").strip()
+        or "eleven_flash_v2_5",
         stability=_tts_stability(scenario),
         similarity_boost=scenario.tts_similarity_boost,
         style=_tts_style(scenario),
@@ -233,41 +241,95 @@ def build_pipeline_session(scenario):
                 language=os.getenv("DEEPGRAM_LANGUAGE", "ko").strip() or "ko",
                 model=os.getenv("DEEPGRAM_MODEL", "nova-2").strip() or "nova-2",
                 endpointing=int(os.getenv("STT_ENDPOINTING_MS", "400")),
-                utterance_end_ms=int(os.getenv("STT_UTTERANCE_END_MS", "1200")),
+                # Dead air between the trainee finishing a sentence and the
+                # caller answering is bounded below by this value, so it is one
+                # of the largest single contributors to perceived latency.
+                # Lower it to ~900 for a snappier caller, raise it if the
+                # caller starts interrupting slow speakers.
+                utterance_end_ms=int(os.getenv("STT_UTTERANCE_END_MS", "1000")),
             )
         ),
-        llm=(
-            GeminiLLM(
-                **_supported_kwargs(
-                    GeminiLLM,
-                    api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
-                    model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-                    or "gemini-3.5-flash-lite",
-                    temperature=0.75,
-                    max_tokens=180,
-                )
-            )
-            if _call_llm_provider() == "gemini"
-            else OpenAILLM(
-                **_supported_kwargs(
-                    OpenAILLM,
-                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
-                    or "gpt-4o-mini",
-                    # Raised from 0.55. At the old value the caller reused the same
-                    # phrasing turn after turn, which reads as scripted. This matches
-                    # ai/llm_stream.py's default so the phone pipeline and the local
-                    # ai/ pipeline behave the same way.
-                    temperature=0.75,
-                    max_tokens=180,
-                )
-            )
-        ),
+        llm=_build_call_llm(GeminiLLM, OpenAILLM),
         tts=ElevenLabsTTS(**tts_kwargs),
         greeting=True,
         opening_line=scenario.opening_line,
         max_turns=scenario.max_turns,
+        quick_replies=getattr(scenario, "quick_replies", ()),
+        hangup_line=getattr(scenario, "hangup_line", ""),
+        reflex_budget=int(os.getenv("CALL_REFLEX_BUDGET", "3")),
     )
     return PhonePipelineSession(**session_kwargs)
+
+
+def _call_max_tokens() -> int:
+    """Output cap for one live turn.
+
+    A reply is two short Korean sentences, roughly 40-60 tokens. 120 leaves
+    headroom without letting a stray long answer run for seconds of TTS.
+    """
+    return int(os.getenv("CALL_MAX_TOKENS", "120"))
+
+
+def _gemini_thinking_kwargs(cls) -> dict:
+    """Ask Gemini to skip hidden reasoning tokens before the first visible one.
+
+    Non-lite Gemini flash models spend hundreds of hidden reasoning tokens
+    before emitting anything, which is dead air on a phone call. Client builds
+    spell the knob differently, so pick whichever name `cls` names explicitly
+    and send nothing otherwise -- a wrong keyword forwarded through a **kwargs
+    passthrough would fail the whole call, which is far worse than being slow.
+    Set GEMINI_THINKING_BUDGET to an empty string to stop sending it.
+    """
+    budget = os.getenv("GEMINI_THINKING_BUDGET", "0").strip()
+    if not budget:
+        return {}
+    accepted = inspect.signature(cls).parameters
+    if "thinking_budget" in accepted:
+        return {"thinking_budget": int(budget)}
+    if "reasoning_effort" in accepted:
+        return {"reasoning_effort": "none" if int(budget) == 0 else "low"}
+    logger.info(
+        "%s exposes no thinking-budget setting; Gemini may spend hidden "
+        "reasoning tokens before the first spoken word",
+        cls.__name__,
+    )
+    return {}
+
+
+def _build_call_llm(gemini_cls, openai_cls):
+    """Construct the in-call LLM, logging any tuning kwargs that got dropped."""
+    if _call_llm_provider() == "gemini":
+        cls = gemini_cls
+        requested = dict(
+            api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
+            model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+            or "gemini-3.5-flash-lite",
+            temperature=0.75,
+            max_tokens=_call_max_tokens(),
+            **_gemini_thinking_kwargs(gemini_cls),
+        )
+    else:
+        cls = openai_cls
+        requested = dict(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+            # Raised from 0.55. At the old value the caller reused the same
+            # phrasing turn after turn, which reads as scripted. This matches
+            # ai/llm_stream.py's default so the phone pipeline and the local
+            # ai/ pipeline behave the same way.
+            temperature=0.75,
+            max_tokens=_call_max_tokens(),
+        )
+
+    kwargs = _supported_kwargs(cls, **requested)
+    dropped = sorted(set(requested) - set(kwargs))
+    if dropped:
+        logger.warning(
+            "%s ignored unsupported settings: %s "
+            "(the installed clawops build does not accept them)",
+            cls.__name__,
+            ", ".join(dropped),
+        )
+    return cls(**kwargs)
 
 
 def _make_clawops_agent(from_number: str, scenario):
@@ -353,12 +415,14 @@ async def _create_outbound_call(session_id: str):
     _require_call_llm_key()
 
     try:
+        # Normally instant: a fixed playbook is picked in process. The timeout
+        # only bites when DYNAMIC_SCENARIO is on and an LLM is writing one.
         scenario = await asyncio.wait_for(
             get_runtime_scenario(),
             timeout=float(os.getenv("SCENARIO_GENERATION_TIMEOUT_SEC", "20")),
         )
-    except Exception as exc:
-        logger.exception("Dynamic scenario generation failed; using base scenario")
+    except Exception:
+        logger.exception("Scenario selection failed; using the default scenario")
         try:
             from app.training.scenarios import get_call_scenario
 

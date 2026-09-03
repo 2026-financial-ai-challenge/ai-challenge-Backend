@@ -21,7 +21,8 @@ def test_default_call_scenario_uses_training_fallback(monkeypatch):
     assert scenario.max_turns == 8
     assert scenario.tts_voice_id
     assert "권위 사칭" in scenario.tactics
-    assert "112/1332" in (scenario.ideal_trainee_response or "")
+    ideal = scenario.ideal_trainee_response or ""
+    assert "112" in ideal and "1332" in ideal
     assert "동적 시나리오 생성을 위한 기본 시드" not in scenario.system_prompt
 
 
@@ -85,7 +86,7 @@ def test_build_pipeline_session_uses_scenario_voice(monkeypatch):
     assert session._llm.model == "gpt-4o-mini"
     assert session._tts.voice_id == "testvoice123"
     assert session._tts._stability == scenario.tts_stability
-    assert session._llm._max_tokens == 180
+    assert session._llm._max_tokens == 120
     assert session._opening_line == scenario.opening_line
     assert session._max_turns == scenario.max_turns
     assert scenario.opening_line in session._system_prompt
@@ -105,7 +106,7 @@ def test_build_pipeline_session_uses_gemini_when_selected(monkeypatch):
     session = call_service.build_pipeline_session(scenario)
     assert session._llm.provider == "gemini"
     assert session._llm.model == "gemini-3.5-flash-lite"
-    assert session._llm._max_tokens == 180
+    assert session._llm._max_tokens == 120
 
 
 def test_env_voice_id_overrides_scenario(monkeypatch):

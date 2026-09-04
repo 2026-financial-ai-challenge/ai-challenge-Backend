@@ -50,9 +50,18 @@ DEFENSE_SCORE_WEIGHTS = {
     "신고 의사 표현": 12,
 }
 
-_HANG_UP = re.compile(
-    r"(끊겠|끊을게|끊을게요|끊습니다|전화 끊|나중에 걸|그만하세요|그만 전화)"
-)
+def _trainee_tried_hangup(trainee_text: str) -> bool:
+    """Shared with the live pipeline so the caller's behaviour and the score
+    agree on what "the trainee tried to end the call" means.
+
+    Asked one utterance at a time rather than over the whole blob: the rule
+    is about where in an utterance a closing lands, and joining every turn
+    into one string would put each of them in the middle of it.
+    """
+    ensure_ai_importable()
+    from ai.hangup import wants_hang_up
+
+    return any(wants_hang_up(line) for line in (trainee_text or "").splitlines())
 _SUSPECT = re.compile(
     r"(의심|누구세요|어디(?:세요|죠)|금감원|검찰|경찰|사기|피싱|대표번호|확인(해|할)|가짜)"
 )
@@ -252,7 +261,7 @@ def heuristic_report(transcript: str, *, source: Literal["live", "clawops"]) -> 
     empty = not blob.strip()
     suspected = bool(_SUSPECT.search(blob))
     gave_name = bool(_NAME_OFFER.search(blob))
-    tried_hangup = bool(_HANG_UP.search(blob))
+    tried_hangup = _trainee_tried_hangup(blob)
     fallback_score = max(
         0,
         min(
@@ -748,6 +757,62 @@ def _clawops_calls() -> Any:
     return ClawOps(api_key=api_key, account_id=account_id).calls
 
 
+def _report_llm_attempts() -> list[tuple[str, Any, str]]:
+    """(label, client, model) attempts for the report LLM, in priority order.
+
+    Both providers are reachable through the OpenAI-compatible chat.completions
+    shape (Gemini via its own compatible endpoint -- see
+    ai/scenarios/generator.py, which already proves response_format=json_object
+    works there), so the same call works against either client. Only the ones
+    whose API key is actually configured are attempted; if neither is, the
+    caller gets a clear error instead of an opaque auth failure.
+    """
+    from openai import AsyncOpenAI
+
+    attempts: list[tuple[str, Any, str]] = []
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if openai_key:
+        attempts.append((
+            "OpenAI",
+            # max_retries=0: the SDK otherwise burns ~1.2s retrying a
+            # credit-exhausted 429 that will never succeed. Falling over to
+            # the other provider is both faster and more likely to work.
+            AsyncOpenAI(api_key=openai_key, max_retries=0),
+            os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+        ))
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        ensure_ai_importable()
+        from ai.config import GEMINI_OPENAI_BASE_URL
+
+        attempts.append((
+            "Gemini",
+            AsyncOpenAI(
+                api_key=gemini_key,
+                base_url=GEMINI_OPENAI_BASE_URL,
+                max_retries=1,
+            ),
+            os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+            or "gemini-3.5-flash-lite",
+        ))
+    return attempts
+
+
+async def _report_completion(
+    client: Any, model: str, system: str, user_content: str
+) -> str:
+    response = await client.chat.completions.create(
+        model=model,
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    return response.choices[0].message.content or "{}"
+
+
 async def _ask_report_llm(
     transcript: str,
     *,
@@ -756,10 +821,7 @@ async def _ask_report_llm(
     client: Any | None,
     scenario: Any | None,
 ) -> _LlmReport:
-    from openai import AsyncOpenAI
-
     risk_labels, defense_labels = _behavior_labels()
-    openai_client = client or AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     source_note = (
         "실시간 STT라 오인식이 있을 수 있다. 확실한 것만 표시한다."
         if source == "live"
@@ -804,19 +866,42 @@ async def _ask_report_llm(
 - 추측으로 채우지 마라
 """.strip()
 
-    response = await openai_client.chat.completions.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": f"대화 기록:\n{transcript}{summary_note}",
-            },
-        ],
-    )
-    raw = response.choices[0].message.content or "{}"
+    user_content = f"대화 기록:\n{transcript}{summary_note}"
+
+    if client is not None:
+        # Caller supplied a client explicitly (tests, or a future caller that
+        # wants a specific provider) -- use exactly that, no fallback.
+        raw = await _report_completion(
+            client,
+            os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+            system,
+            user_content,
+        )
+    else:
+        attempts = _report_llm_attempts()
+        if not attempts:
+            raise RuntimeError(
+                "Report LLM unavailable: neither OPENAI_API_KEY nor "
+                "GEMINI_API_KEY is set"
+            )
+        raw = None
+        last_error: Exception | None = None
+        for label, attempt_client, model in attempts:
+            try:
+                raw = await _report_completion(attempt_client, model, system, user_content)
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Report LLM via %s failed; trying next provider: %s",
+                    label,
+                    exc,
+                )
+        if raw is None:
+            raise RuntimeError(
+                "Report LLM failed on every configured provider"
+            ) from last_error
+
     try:
         return _LlmReport.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError) as exc:

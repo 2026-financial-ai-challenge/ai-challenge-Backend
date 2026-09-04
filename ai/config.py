@@ -7,6 +7,13 @@ from dotenv import load_dotenv
 
 _AI_DIR = Path(__file__).resolve().parent
 load_dotenv(_AI_DIR / ".env")
+# backend/.env is the single source of truth for the in-call LLM
+# (CALL_LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL). Filling the gaps from it
+# means the local latency harness measures the same provider the phone
+# pipeline uses without those keys being pasted into two files, where they
+# would inevitably drift. override=False keeps ai/.env authoritative for
+# anything it does set, and mirrors how backend/app/main.py reads ai/.env.
+load_dotenv(_AI_DIR.parent / "backend" / ".env", override=False)
 
 
 def _require(name: str) -> str:
@@ -43,6 +50,22 @@ def scenario_llm_provider() -> str:
 
 def gemini_api_key() -> str:
     return _require("GEMINI_API_KEY")
+
+
+def call_llm_provider() -> str:
+    """Which LLM answers the trainee during a live turn.
+
+    Mirrors backend/.env's CALL_LLM_PROVIDER. Without this the local latency
+    harness always measured OpenAI even when the phone pipeline was running
+    on Gemini, so its numbers described a path nobody was using.
+    """
+    return os.getenv("CALL_LLM_PROVIDER", "openai").strip().lower() or "openai"
+
+
+def call_llm_model() -> str:
+    if call_llm_provider() == "gemini":
+        return os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
+    return openai_model()
 
 
 def elevenlabs_api_key() -> str:
@@ -82,4 +105,14 @@ def stt_sample_rate() -> int:
 
 
 def stt_endpointing_ms() -> int:
+    """Silence before Deepgram calls a turn finished.
+
+    This is what actually floors perceived response latency: a normal turn
+    ends on speech_final, which fires after this much silence.
+    """
     return int(os.getenv("STT_ENDPOINTING_MS", "400"))
+
+
+def stt_utterance_end_ms() -> int:
+    """Backstop for turns where Deepgram never sends speech_final."""
+    return int(os.getenv("STT_UTTERANCE_END_MS", "1000"))

@@ -195,6 +195,7 @@ def build_pipeline_session(scenario):
             OpenAILLM,
         )
         from app.training.deepgram_stt import PhoneDeepgramSTT
+        from app.training.gemini_llm import PhoneGeminiLLM
         from app.training.pipeline_session import PhonePipelineSession
     except ImportError as exc:
         raise CallConfigurationError(
@@ -209,18 +210,25 @@ def build_pipeline_session(scenario):
     # ones silently, which would otherwise make a voice-tuning change look
     # applied when it never reached ElevenLabs.
     # eleven_flash_v2_5 is ElevenLabs' lowest-latency Korean-capable model.
-    # Note that app/main.py also loads ai/.env, so an ELEVENLABS_MODEL_ID set
-    # there silently wins over this default in the phone pipeline -- keep the
-    # two files in agreement.
+    # The value itself lives in ai/.env, which app/main.py also loads, so both
+    # the phone pipeline and the local harness read one copy. This default is
+    # only the floor for deployments that ship no .env at all.
     tts_requested = dict(
         voice_id=voice_id,
         model=os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5").strip()
         or "eleven_flash_v2_5",
         stability=_tts_stability(scenario),
         similarity_boost=scenario.tts_similarity_boost,
+        # style / use_speaker_boost / speed are NOT in the installed
+        # ElevenLabsTTS signature (verified against clawops 0.46.1), so they
+        # are sent only so the warning below names them if a future build
+        # starts accepting them. Scenario tts_style / tts_speed currently
+        # affect the local ai/ pipeline only.
         style=_tts_style(scenario),
         use_speaker_boost=True,
         speed=_tts_speed(scenario),
+        output_format=os.getenv("ELEVENLABS_OUTPUT_FORMAT", "pcm_24000").strip()
+        or "pcm_24000",
         language_code="ko",
     )
     tts_kwargs = _supported_kwargs(ElevenLabsTTS, **tts_requested)
@@ -240,16 +248,18 @@ def build_pipeline_session(scenario):
                 DeepgramSTT,
                 language=os.getenv("DEEPGRAM_LANGUAGE", "ko").strip() or "ko",
                 model=os.getenv("DEEPGRAM_MODEL", "nova-2").strip() or "nova-2",
+                # This is the real handle on dead air. A normal turn ends on
+                # Deepgram's speech_final, which fires after this much silence
+                # (see UtteranceAssembler in app/training/deepgram_stt.py), so
+                # perceived latency is floored here -- not at utterance_end_ms.
+                # 250-300 is noticeably snappier; too low cuts off slow speakers.
                 endpointing=int(os.getenv("STT_ENDPOINTING_MS", "400")),
-                # Dead air between the trainee finishing a sentence and the
-                # caller answering is bounded below by this value, so it is one
-                # of the largest single contributors to perceived latency.
-                # Lower it to ~900 for a snappier caller, raise it if the
-                # caller starts interrupting slow speakers.
+                # Backstop only, for the case where Deepgram never sends
+                # speech_final. It bounds the worst turn, not the typical one.
                 utterance_end_ms=int(os.getenv("STT_UTTERANCE_END_MS", "1000")),
             )
         ),
-        llm=_build_call_llm(GeminiLLM, OpenAILLM),
+        llm=_build_call_llm(PhoneGeminiLLM, OpenAILLM),
         tts=ElevenLabsTTS(**tts_kwargs),
         greeting=True,
         opening_line=scenario.opening_line,
@@ -257,17 +267,30 @@ def build_pipeline_session(scenario):
         quick_replies=getattr(scenario, "quick_replies", ()),
         hangup_line=getattr(scenario, "hangup_line", ""),
         reflex_budget=int(os.getenv("CALL_REFLEX_BUDGET", "3")),
+        stall_line=os.getenv("CALL_STALL_LINE", "").strip(),
     )
     return PhonePipelineSession(**session_kwargs)
 
 
-def _call_max_tokens() -> int:
+def _call_max_tokens(provider: str) -> int:
     """Output cap for one live turn.
 
-    A reply is two short Korean sentences, roughly 40-60 tokens. 120 leaves
-    headroom without letting a stray long answer run for seconds of TTS.
+    A reply is two short Korean sentences, roughly 40-60 tokens, so 120 is
+    ample for OpenAI and keeps a stray long answer from running for seconds
+    of TTS.
+
+    Gemini gets a much higher ceiling on purpose. Gemini counts hidden
+    thinking tokens against the output budget, so a tight cap can be spent
+    entirely on reasoning and return empty content -- which on a phone call
+    is dead silence, not a slow answer. ai/scenarios/generator.py:31-34
+    records exactly that ("sometimes empty content") on non-lite models.
+    Length is already controlled by the prompt rule in
+    ai/scenarios/playbook.py ("짧은 문장 두 개까지"), so the high cap costs
+    nothing in practice. Drop it once you have confirmed from usage metadata
+    that thinking really is off.
     """
-    return int(os.getenv("CALL_MAX_TOKENS", "120"))
+    default = "120" if provider == "openai" else "512"
+    return int(os.getenv("CALL_MAX_TOKENS", default))
 
 
 def _gemini_thinking_kwargs(cls) -> dict:
@@ -296,30 +319,8 @@ def _gemini_thinking_kwargs(cls) -> dict:
     return {}
 
 
-def _build_call_llm(gemini_cls, openai_cls):
-    """Construct the in-call LLM, logging any tuning kwargs that got dropped."""
-    if _call_llm_provider() == "gemini":
-        cls = gemini_cls
-        requested = dict(
-            api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
-            model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-            or "gemini-3.5-flash-lite",
-            temperature=0.75,
-            max_tokens=_call_max_tokens(),
-            **_gemini_thinking_kwargs(gemini_cls),
-        )
-    else:
-        cls = openai_cls
-        requested = dict(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
-            # Raised from 0.55. At the old value the caller reused the same
-            # phrasing turn after turn, which reads as scripted. This matches
-            # ai/llm_stream.py's default so the phone pipeline and the local
-            # ai/ pipeline behave the same way.
-            temperature=0.75,
-            max_tokens=_call_max_tokens(),
-        )
-
+def _construct_logged(cls, requested: dict):
+    """Instantiate `cls`, warning about any kwarg the installed build drops."""
     kwargs = _supported_kwargs(cls, **requested)
     dropped = sorted(set(requested) - set(kwargs))
     if dropped:
@@ -330,6 +331,73 @@ def _build_call_llm(gemini_cls, openai_cls):
             ", ".join(dropped),
         )
     return cls(**kwargs)
+
+
+def _build_gemini_llm(gemini_cls):
+    requested = dict(
+        api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
+        model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+        or "gemini-3.5-flash-lite",
+        temperature=0.75,
+        max_tokens=_call_max_tokens("gemini"),
+        # Gemini returns 503 UNAVAILABLE often enough that a single try
+        # loses the turn. See app/training/gemini_llm.py.
+        attempts=int(os.getenv("GEMINI_ATTEMPTS", "2")),
+        fallback_models=tuple(
+            m.strip()
+            for m in os.getenv("GEMINI_FALLBACK_MODELS", "").split(",")
+            if m.strip()
+        ),
+        **_gemini_thinking_kwargs(gemini_cls),
+    )
+    return _construct_logged(gemini_cls, requested)
+
+
+def _build_openai_llm(openai_cls):
+    requested = dict(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+        # Raised from 0.55. At the old value the caller reused the same
+        # phrasing turn after turn, which reads as scripted. This matches
+        # ai/llm_stream.py's default so the phone pipeline and the local
+        # ai/ pipeline behave the same way.
+        temperature=0.75,
+        max_tokens=_call_max_tokens("openai"),
+    )
+    return _construct_logged(openai_cls, requested)
+
+
+def _build_call_llm(gemini_cls, openai_cls):
+    """Construct the in-call LLM: CALL_LLM_PROVIDER picks the primary, and the
+    other provider becomes an automatic fallback for one live turn if its own
+    API key is also configured.
+
+    Without this, an exhausted or down primary key means every turn falls
+    through to PhonePipelineSession's stall line -- the trainee hears "잠시만
+    기다려 주십시오" instead of an answer, for the whole call. With both keys
+    present, one provider failing outright still lets the call continue on
+    the other. See app/training/fallback_llm.py for the switch-only-before-
+    the-first-token rule that keeps this from repeating a half-spoken reply.
+    """
+    from app.training.fallback_llm import FallbackLLM
+
+    if _call_llm_provider() == "gemini":
+        primary, primary_label = _build_gemini_llm(gemini_cls), "Gemini"
+        secondary_key, secondary_label = "OPENAI_API_KEY", "OpenAI"
+        build_secondary = lambda: _build_openai_llm(openai_cls)
+    else:
+        primary, primary_label = _build_openai_llm(openai_cls), "OpenAI"
+        secondary_key, secondary_label = "GEMINI_API_KEY", "Gemini"
+        build_secondary = lambda: _build_gemini_llm(gemini_cls)
+
+    if not os.getenv(secondary_key, "").strip():
+        return primary
+
+    return FallbackLLM(
+        primary,
+        build_secondary(),
+        primary_label=primary_label,
+        secondary_label=secondary_label,
+    )
 
 
 def _make_clawops_agent(from_number: str, scenario):

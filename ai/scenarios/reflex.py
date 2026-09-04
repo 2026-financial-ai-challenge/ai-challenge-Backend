@@ -17,10 +17,19 @@ from __future__ import annotations
 import re
 
 __all__ = [
+    "MAX_REFLEX_CHARS",
     "REFLEX_TRIGGERS",
     "ReflexTable",
     "match_trigger",
 ]
+
+# A reflex answers a one-liner ("안 들려요", "누구세요?"). The same words inside
+# a long answer -- "이게 도대체 누구한테 가는 돈인지 설명을 해 보세요" -- are a
+# different intent entirely, and search() cannot tell the two apart, so
+# anything past the length of a one-liner goes to the LLM where it belongs.
+# Answering a paragraph with a canned "가온금융안전원 서동현입니다." is worse
+# than answering it a beat later.
+MAX_REFLEX_CHARS = 40
 
 # Ordered: the first pattern that matches wins, so put the more specific
 # intents (a scam accusation) ahead of the generic ones ("누구세요").
@@ -53,7 +62,7 @@ REFLEX_TRIGGERS: tuple[tuple[str, re.Pattern[str]], ...] = (
 def match_trigger(text: str) -> str | None:
     """Return the canonical trigger name for a trainee utterance, or None."""
     cleaned = (text or "").strip()
-    if not cleaned:
+    if not cleaned or len(cleaned) > MAX_REFLEX_CHARS:
         return None
     for name, pattern in REFLEX_TRIGGERS:
         if pattern.search(cleaned):

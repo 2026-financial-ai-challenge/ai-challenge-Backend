@@ -26,7 +26,6 @@ __all__ = [
     "Scenario",
     "get_scenario",
     "pick_scenario",
-    "scenario_ids",
 ]
 
 DEFAULT_SCENARIO_ID = DEFAULT_PLAYBOOK_ID
@@ -42,10 +41,6 @@ _ALIASES = {"voice_phishing_training": DEFAULT_SCENARIO_ID}
 # Which scenario the last pick_scenario() handed out, so back-to-back training
 # calls in one process do not repeat themselves.
 _last_picked_id: str | None = None
-
-
-def scenario_ids() -> tuple[str, ...]:
-    return tuple(SCENARIOS)
 
 
 def get_scenario(scenario_id: str) -> Scenario:

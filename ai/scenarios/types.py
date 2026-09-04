@@ -12,7 +12,7 @@ class Scenario:
     max_turns: int
     tts_voice_id: str | None = None
     tts_stability: float = 0.3
-    tts_similarity_boost: float = 0.35
+    tts_similarity_boost: float = 0.7
     # Style adds inflection instead of a flat reading-a-script tone; speed just
     # under 1.0 keeps the delivery from sounding rushed. These live on Scenario
     # (not hardcoded in tts_stream.py) so the phone pipeline in

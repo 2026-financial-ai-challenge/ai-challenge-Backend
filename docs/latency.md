@@ -1,5 +1,26 @@
 # 통화 응답 지연 줄이기
 
+> **먼저 읽을 것 — 측정 결과 (2026-09-04)**
+>
+> 이 저장소의 Gemini 키로 실제 측정한 결과, **지연의 지배적 원인은 코드가 아니라
+> Gemini 엔드포인트 자체**입니다. 아래 튜닝은 전부 유효하지만, 이 항목을 해결하지
+> 않으면 체감은 거의 안 바뀝니다.
+>
+> | 모델 | 결과 |
+> | --- | --- |
+> | `gemini-3.5-flash-lite` | 503 UNAVAILABLE / 15초 타임아웃 — **전 요청 실패** |
+> | `gemini-3.1-flash-lite` | 유일하게 응답. 첫 토큰 **1.9 ~ 15.7초** |
+> | `gemini-flash-latest`, `3.5-flash`, `3.6-flash` | 15초 타임아웃 |
+> | `gemini-2.5-flash`, `2.5-flash-lite` | 404 (OpenAI 호환 엔드포인트에서 사용 불가) |
+> | OpenAI `gpt-4o-mini` | 429 — **크레딧 없음** |
+>
+> `reasoning_effort='none'`으로 thinking을 꺼도, 프롬프트를 1/10로 줄여도
+> 지연이 줄지 않았습니다. 2초와 16초를 오가는 편차는 서버 측 대기열의 특징입니다.
+>
+> **결론: 유료 티어 Gemini 키나 OpenAI 크레딧이 없으면 실시간 통화 품질은
+> 나오지 않습니다.** 아래 항목들은 그 위에서 추가로 얻는 이득입니다.
+
+
 훈련 통화에서 사용자가 체감하는 지연은 두 군데에 있습니다.
 
 1. **전화가 울리기까지** — 발신 버튼을 누르고 실제로 통화가 시작될 때까지
@@ -43,9 +64,11 @@
 | ElevenLabs 모델 교체 | `call_service.py` `build_pipeline_session` | 아래 설명 참고. 이번 변경 중 턴당 체감이 가장 큽니다 |
 | 즉답 경로 | `pipeline_session.py` `_handle_final_transcript` | 해당 턴은 LLM 왕복이 통째로 사라집니다 |
 | Gemini thinking budget 0 | `call_service.py` `_gemini_thinking_kwargs` | 숨은 reasoning 토큰 제거 |
-| `max_tokens` 180 → 120 | `call_service.py` `_call_max_tokens` | 첫 토큰은 그대로, 긴 답변 꼬리만 자릅니다 |
+| `max_tokens` provider별 분리 | `call_service.py` `_call_max_tokens` | 아래 설명 참고 |
 | `utterance_end_ms` 1200 → 1000 | `call_service.py` `build_pipeline_session` | 아래 설명 참고 |
 | 프롬프트 중복 제거 | `call_service.py` `phone_system_prompt` | 입력 토큰 감소 |
+| TTS 첫 청크 버퍼링 제거 | `ai/tts_stream.py` | 로컬 경로에서 최대 85ms |
+| 하네스가 실제 provider를 재도록 수정 | `ai/test_latency.py`, `ai/llm_stream.py` | 측정 자체가 가능해집니다 |
 
 #### ElevenLabs 모델이 잘못 잡혀 있었습니다
 
@@ -61,6 +84,18 @@ multilingual v2와의 실제 차이는 회선에서 직접 재 보십시오.
 
 음질이 아쉬우면 `ELEVENLABS_MODEL_ID=eleven_turbo_v2_5`가 중간 선택지입니다.
 
+#### max_tokens는 provider마다 다릅니다
+
+Gemini는 **숨은 thinking 토큰도 출력 예산에서 깎습니다.** 상한을 120처럼 낮게 잡으면
+thinking이 예산을 다 먹고 본문이 빈 채로 돌아올 수 있고, 전화에서 그건 느린 답변이
+아니라 **무음**입니다. `ai/scenarios/generator.py`의 주석이 실제로 그 현상
+("sometimes empty content")을 기록해 두었습니다.
+
+그래서 기본값을 갈랐습니다. OpenAI는 120, Gemini는 512입니다.
+길이 통제는 이미 프롬프트의 "짧은 문장 두 개까지" 규칙이 하고 있어서
+상한을 올려도 실제 답변이 길어지지는 않습니다.
+usage 메타데이터로 thinking이 정말 꺼진 걸 확인한 뒤에만 Gemini 쪽도 내리십시오.
+
 #### 즉답 경로 (reflex)
 
 "안 들려요", "누구세요?", "지금 바빠요", "이거 보이스피싱 아니에요?" 처럼
@@ -74,7 +109,7 @@ multilingual v2와의 실제 차이는 회선에서 직접 재 보십시오.
 특히 "이거 보이스피싱 아니에요?"는 **즉답이 실감에도 유리합니다.**
 진짜 사기범은 이 질문에 망설이지 않습니다.
 
-#### utterance_end_ms는 백스톱입니다
+#### 진짜 손잡이는 endpointing입니다
 
 `PhoneDeepgramSTT`는 `endpointing`(기본 400ms)과 `utterance_end_ms`를 함께 보냅니다.
 `UtteranceAssembler`는 `speech_final`과 `UtteranceEnd` 중 **먼저 오는 쪽**으로
@@ -83,9 +118,14 @@ multilingual v2와의 실제 차이는 회선에서 직접 재 보십시오.
 `deepgram_stt.py`의 모듈 설명이 그런 경우가 실제로 있다고 적어 두었으니,
 1200 → 1000은 그 폴백 경로에서만 200ms를 아낍니다.
 
-더 줄이려면 `STT_ENDPOINTING_MS`를 400에서 250~300으로 내리는 쪽이
-효과가 큽니다. 다만 말이 느린 사람의 문장 중간을 끊을 수 있으니
-실제 훈련자 연령대로 시험해 보고 정하십시오.
+**체감 지연을 실제로 줄이는 값은 `STT_ENDPOINTING_MS`(기본 400)입니다.**
+400 → 300으로 내리면 매 턴 약 100ms가 산술적으로 그대로 줄어듭니다.
+250까지 내리면 150ms입니다. 다만 말이 느린 사람의 문장 중간을 끊을 수 있으니
+실제 훈련자 연령대로 시험해 보고 정하십시오. 이번에는 기본값을 건드리지 않았습니다.
+
+`ai/stt_stream.py`는 `utterance_end_ms`를 1200으로 **하드코딩**해서
+`STT_UTTERANCE_END_MS`를 무시하고 있었습니다. 그래서 로컬 측정이 전화 경로보다
+200ms 비관적으로 나왔습니다. 지금은 환경변수를 읽습니다.
 
 ## 3. 프롬프트만으로 줄이는 법
 
@@ -128,6 +168,28 @@ multilingual v2와의 실제 차이는 회선에서 직접 재 보십시오.
 직렬화해서, 두 번째 통화는 최대 20초를 기다린 뒤 실패합니다.
 지연이 아니라 처리량 문제지만 같이 걸립니다.
 
+## 4-1. 통화가 인사말만 하고 멈추던 원인 (해결됨)
+
+`GEMINI_MODEL=gemini-3.5-flash-lite`가 모든 요청에서 503을 반환하고 있었습니다.
+인사말은 `_speak_fixed`로 LLM을 거치지 않아 정상 재생되고, 그 뒤 모든 턴은
+LLM을 타므로 전부 실패했습니다. 증상이 "인사말만 하고 응답 없음"이었던 이유입니다.
+
+원인 파악이 어려웠던 이유가 하나 더 있습니다. clawops의 `PipelineSession._respond`는
+LLM 스트림을 TTS 코루틴 안에서 소비하기 때문에, **Gemini의 503이
+`ElevenLabs send error`라는 라벨로 로그에 찍힙니다.** 에러 본문이
+`{"error": {"code": 503, "status": "UNAVAILABLE"}}` 형태면 ElevenLabs가 아니라
+Google 쪽입니다.
+
+세 가지를 고쳤습니다.
+
+1. `GEMINI_MODEL`을 실제로 응답하는 `gemini-3.1-flash-lite`로 교체
+2. `app/training/gemini_llm.py`의 `PhoneGeminiLLM` — 첫 토큰 전 실패는 재시도하고
+   `GEMINI_FALLBACK_MODELS`로 넘어갑니다. 이미 말을 시작한 뒤 실패하면
+   재시도하지 않습니다(같은 말을 두 번 하게 되므로).
+3. `_respond` 오버라이드 — 턴이 아무 소리도 못 냈으면 시나리오의
+   "다시 말한다" 문장을 대신 내보냅니다. `_respond`가 예외를 삼키고 조용히
+   끝나던 자리라, 전화에서는 그게 무음이었습니다.
+
 ## 5. 재는 법
 
 ```
@@ -136,10 +198,10 @@ python -m ai.test_latency --mic
 
 `발화 종료 → 첫 TTS 오디오 바이트`를 찍어 줍니다. 목표는 1000ms 미만입니다.
 
-한 가지 주의: `ai/test_latency.py`는 LLM 클라이언트를
-`AsyncOpenAI(api_key=openai_api_key())`로 직접 만들기 때문에
-`CALL_LLM_PROVIDER=gemini`여도 **로컬 측정은 항상 OpenAI를 씁니다.**
-전화 경로의 Gemini 지연을 재려면 실제 통화 로그를 봐야 합니다.
+예전에는 이 하네스가 `AsyncOpenAI`를 직접 만들어서 `CALL_LLM_PROVIDER=gemini`여도
+**항상 OpenAI를 쟀습니다.** 즉 프로덕션 경로를 전혀 측정하지 못했습니다.
+지금은 `ai/config.py`의 `CALL_LLM_PROVIDER`를 따라가고, 실행 시 어떤 모델을
+재는지 첫 줄에 찍습니다. `ai/.env`의 값을 `backend/.env`와 같게 맞춰 두십시오.
 
 또 하나: `ai/sentences.py`(와 그 안의 `sanitize_spoken_text`)는
 로컬 `ai/` 파이프라인에서만 쓰입니다. 전화 경로는 ClawOps의 문장 분할을

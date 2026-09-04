@@ -20,13 +20,20 @@ from ai.scenarios.types import Scenario
 __all__ = ["Playbook", "build_system_prompt"]
 
 
+# Every sentence still has to end in punctuation the pipeline can split on
+# (clawops splits the stream at [.!?。！？]), but "!" was previously banned,
+# which flattened every urgent or pleading line into the same even tone.
 _STYLE_RULES = """
 [말하는 방식]
+- 글이 아니라 말이다. 안내문이나 공지를 읽는 투로 말하지 않는다.
 - 한 번에 짧은 문장 두 개까지만 말한다. 첫 문장은 특히 짧게 시작한다.
-- 모든 문장을 마침표나 물음표로 끝낸다.
-- 상대가 방금 한 말에 곧바로 이어서 답한다. 준비된 대사를 순서대로 읽지 않는다.
+- 모든 문장을 마침표, 물음표, 느낌표 중 하나로 끝낸다.
+- 상대가 방금 쓴 단어를 하나 골라 되받아 쓴다. 그래야 듣고 있는 사람으로 들린다.
+- 한 마디로 끊어 치는 대답을 섞는다. "네?", "아니요.", "잠깐만요." 처럼 짧아도 된다.
+- 말을 하다 고쳐 잡아도 된다. "아니, 그게 아니라" 처럼 자연스럽게 이어 간다.
+- "음", "아", "그러니까", "저기" 같은 군말을 필요할 때만 섞는다. 매번 넣지 않는다.
+- 급하거나 감정이 올라가면 문장이 짧아지고, 달래거나 설득할 때는 조금 길어진다.
 - 매 응답마다 어휘와 문장 구조를 바꾼다. 같은 표현을 두 번 쓰지 않는다.
-- 필요할 때 "음", "아", "그러니까" 같은 구어체 접속어를 섞는다.
 - 사건 설정에 적힌 시각과 금액과 이름만 쓴다. 새 숫자를 지어내지 않는다.
 - 대사만 말한다. 목록, 마크다운, 괄호 지문, 상황 설명을 쓰지 않는다.
 """.strip()

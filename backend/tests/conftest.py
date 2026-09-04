@@ -2,10 +2,15 @@ import os
 from pathlib import Path
 
 import psycopg
+import pytest
 from alembic import command
 from alembic.config import Config
 from psycopg import sql
 from sqlalchemy.engine import make_url
+
+# Where _configure_test_database() decided the suite is allowed to write.
+# _engine_is_bound_to_the_test_database() below holds the run to it.
+_TEST_URL = None
 
 
 def _configure_test_database() -> None:
@@ -41,6 +46,9 @@ def _configure_test_database() -> None:
                 sql.SQL("CREATE DATABASE {}").format(sql.Identifier(test_database))
             )
 
+    global _TEST_URL
+    _TEST_URL = test_url
+
     resolved_test_url = test_url.render_as_string(hide_password=False)
     os.environ["DATABASE_URL"] = resolved_test_url
     os.environ.pop("DATABASE_PUBLIC_URL", None)
@@ -52,3 +60,40 @@ def _configure_test_database() -> None:
 
 
 _configure_test_database()
+
+
+def _target(url) -> tuple:
+    """The part of a URL that decides which database gets written to."""
+    return (url.host, url.port, url.database)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _engine_is_bound_to_the_test_database() -> None:
+    """Stop the run if anything re-pointed the suite at a real database.
+
+    _configure_test_database() runs at import time, but the app is imported
+    later -- during collection -- and it loads backend/.env, which carries the
+    deployed DATABASE_URL. Any future path that puts that value back (an
+    override=True, a stray load_dotenv, a fixture) would have the suite
+    creating and dropping rows in the deployed database with nothing to say
+    so. The engine is what queries actually go through, so check that; the
+    environment matters too, for anything that builds an engine of its own.
+    """
+    from app.database import engine
+
+    problems = []
+    if _target(engine.url) != _target(_TEST_URL):
+        problems.append(
+            f"engine is bound to {engine.url.host}/{engine.url.database}"
+        )
+    live = os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL") or ""
+    if live and _target(make_url(live)) != _target(_TEST_URL):
+        env_url = make_url(live)
+        problems.append(f"DATABASE_URL now points at {env_url.host}/{env_url.database}")
+    if problems:
+        pytest.exit(
+            "Refusing to run against a database the suite did not prepare: "
+            + "; ".join(problems)
+            + f". Expected {_TEST_URL.host}/{_TEST_URL.database}.",
+            returncode=2,
+        )

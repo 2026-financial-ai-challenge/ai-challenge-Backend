@@ -30,7 +30,13 @@ from openai import AsyncOpenAI
 
 from ai.audio_io import AudioSink, LocalMicSource, LocalSpeakerSink, NullAudioSink
 from ai.classifier import classify_behaviors
-from ai.config import elevenlabs_sample_rate, openai_api_key, stt_sample_rate
+from ai.config import (
+    call_llm_model,
+    call_llm_provider,
+    elevenlabs_sample_rate,
+    stt_sample_rate,
+)
+from ai.llm_stream import build_call_llm_client
 from ai.conversation_pipeline import (
     ChatMessage,
     LatencyMetrics,
@@ -115,6 +121,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     print("Safety Phishing Call — 교육용 시뮬레이션")
     print(f"시나리오: {scenario.name} ({scenario.id})")
     print(f"최대 턴: {scenario.max_turns}")
+    print(f"LLM: {call_llm_provider()} / {call_llm_model()}")
     if args.mic:
         print("입력: 로컬 마이크 (Deepgram 스트리밍 STT). 종료는 Ctrl+C")
         print("목표: 발화 종료 → 첫 TTS 오디오 바이트 < 1000ms")
@@ -123,7 +130,7 @@ async def _async_main(args: argparse.Namespace) -> int:
         print("목표: Enter → 첫 TTS 오디오 바이트 < 1000ms")
     print()
 
-    llm_client = AsyncOpenAI(api_key=openai_api_key())
+    llm_client = build_call_llm_client()
     mic: LocalMicSource | None = None
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as tts_client:

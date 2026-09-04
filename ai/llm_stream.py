@@ -10,18 +10,36 @@ from collections.abc import AsyncIterator, Callable, Sequence
 
 from openai import AsyncOpenAI
 
-from ai.config import openai_api_key, openai_model
+from ai.config import (
+    GEMINI_OPENAI_BASE_URL,
+    call_llm_model,
+    call_llm_provider,
+    gemini_api_key,
+    openai_api_key,
+)
 from ai.sentences import feed_sentence_buffer, flush_sentence_buffer, split_complete_text
 
 ChatMessage = dict[str, str]
 
 __all__ = [
     "ChatMessage",
+    "build_call_llm_client",
     "feed_sentence_buffer",
     "flush_sentence_buffer",
     "generate_llm_sentences",
     "split_complete_text",
 ]
+
+
+def build_call_llm_client() -> AsyncOpenAI:
+    """Client for the in-call LLM, honouring CALL_LLM_PROVIDER.
+
+    Gemini is reached through its OpenAI-compatible endpoint, so the same
+    AsyncOpenAI client works for both providers.
+    """
+    if call_llm_provider() == "gemini":
+        return AsyncOpenAI(api_key=gemini_api_key(), base_url=GEMINI_OPENAI_BASE_URL)
+    return AsyncOpenAI(api_key=openai_api_key())
 
 
 async def generate_llm_sentences(
@@ -40,9 +58,9 @@ async def generate_llm_sentences(
 
     `on_first_token` is an optional zero-arg callable fired on the first delta.
     """
-    openai_client = client or AsyncOpenAI(api_key=openai_api_key())
+    openai_client = client or build_call_llm_client()
     stream = await openai_client.chat.completions.create(
-        model=model or openai_model(),
+        model=model or call_llm_model(),
         messages=list(messages),
         temperature=temperature,
         max_tokens=max_tokens,

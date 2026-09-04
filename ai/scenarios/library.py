@@ -17,7 +17,7 @@ hint that the caller is anything other than the person they claim to be.
 from __future__ import annotations
 
 from ai.scenarios.playbook import Playbook
-from ai.voices import Hanna, Onyu, YOHAN_KOO, Zara
+from ai.voices import Kelee_K, Onyu, THEO, YOHAN_KOO
 
 __all__ = ["DEFAULT_PLAYBOOK_ID", "PLAYBOOKS"]
 
@@ -141,8 +141,8 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             ("busy_now", "일 분이면 끝나요. 오늘 안에 접수 안 하시면 순번이 넘어가서요."),
         ),
         hangup_line="그럼 오늘 순번은 대기자분께 넘기겠습니다. 나중에 다시 신청하셔도 이 금리는 안 나와요.",
-        # 여성. 상냥한 권유에서 마감 압박으로 넘어가는 온도 차
-        tts_voice_id=Zara,
+        # Zara(여성)가 어울리지만 이 계정에서 합성이 안 됩니다. ai/voices.py 참고.
+        tts_voice_id=Kelee_K,
     ),
     Playbook(
         # 이중 결제 환불 확인 — 결제사칭형 · 난이도 하
@@ -203,8 +203,8 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             ("busy_now", "일 분이면 끝납니다. 이만 삼천 원 건 하나만 정리하겠습니다."),
         ),
         hangup_line="지금 끊으시면 그 이만 삼천 원 환불 접수는 오늘 자로 취소됩니다.",
-        # 여성. 일상적인 콜센터 톤
-        tts_voice_id=Hanna,
+        # THEO는 voices.py 설명 그대로 '서울 억양의 부드러운 콜센터' 톤입니다.
+        tts_voice_id=THEO,
     ),
     Playbook(
         # 액정 깨진 자녀 사칭 — 지인사칭형 · 난이도 중
@@ -264,8 +264,8 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             ("busy_now", "일 분이면 돼. 제발 끊지 마."),
         ),
         hangup_line="진짜 이러기야, 나 이제 어떡해.",
-        # 여성. 울먹이는 젊은 자녀
-        tts_voice_id=Zara,
+        # 울먹이는 젊은 자녀에는 여성 목소리가 맞지만, 쓸 수 있는 것 중에서 고른 값입니다.
+        tts_voice_id=Kelee_K,
     ),
     Playbook(
         # 명의도용 조사 압박 — 수사기관사칭형 · 난이도 상

@@ -63,6 +63,18 @@ def test_library_text_passes_the_generator_safety_gates():
             assert not _UNSAFE_TOKEN.search(value), (playbook.id, value)
 
 
+def test_every_scenario_uses_a_voice_this_account_can_synthesize():
+    """Hanna and Zara return zero bytes on this ElevenLabs plan, which is
+    silence on the call rather than a different-sounding voice. Assigning one
+    to a scenario is invisible while ELEVENLABS_VOICE_RANDOM=true and breaks
+    the call the moment it is turned off."""
+    from ai.scenarios import SCENARIOS
+    from ai.voices import WORKING_VOICE_IDS
+
+    for scenario in SCENARIOS.values():
+        assert scenario.tts_voice_id in WORKING_VOICE_IDS, scenario.id
+
+
 def test_quick_replies_use_known_triggers():
     from ai.scenarios.library import PLAYBOOKS
     from ai.scenarios.reflex import REFLEX_TRIGGERS
@@ -150,6 +162,22 @@ def test_reflex_trigger_matching(utterance, trigger):
     from ai.scenarios.reflex import match_trigger
 
     assert match_trigger(utterance) == trigger
+
+
+def test_reflex_ignores_a_trigger_word_inside_a_long_answer():
+    """A reflex answers a one-liner. PhonePipelineSession now hands over a
+    whole merged answer, and "누구" somewhere inside one is an argument, not
+    a request to introduce yourself -- answering it from the table would talk
+    straight past everything else the trainee said."""
+    from ai.scenarios.reflex import match_trigger
+
+    assert (
+        match_trigger(
+            "아니 그러니까 이게 도대체 누구한테 가는 돈인지부터 설명을 좀 해 보세요 저는 못 믿겠어요"
+        )
+        is None
+    )
+    assert match_trigger("누구세요") == "who_is_this"
 
 
 def test_reflex_table_fires_once_per_trigger_and_respects_budget():

@@ -15,6 +15,18 @@ Hanna = "zgDzx5jLLCqEp6Fl7Kl7"
 Onyu = "NaQdbkW5gNZD8wfwXeTV"
 Zara = "jqcCZkN6Knx8BJ5TBdYR"
 
+# Verified by synthesizing a Korean line against this account: THEO,
+# YOHAN_KOO, Kelee_K and Onyu return audio; Hanna and Zara return nothing at
+# all (Voice Library voices need a paid plan -- the API answers 402 and the
+# stream closes with zero bytes, which on a call is total silence, not a
+# degraded voice). Only assign a scenario a voice from this tuple.
+WORKING_VOICE_IDS = (
+    THEO,
+    YOHAN_KOO,
+    Kelee_K,
+    Onyu,
+)
+
 AVAILABLE_VOICE_IDS = (
     THEO,
     YOHAN_KOO,

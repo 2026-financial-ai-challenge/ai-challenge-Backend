@@ -13,9 +13,18 @@ from app.routers import auth, call, consent, report, session, webhook
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _REPO_DIR = Path(__file__).resolve().parents[2]
-load_dotenv(_BACKEND_DIR / ".env", override=True)
-for _ai_env in (_REPO_DIR / "ai" / ".env", Path("/packages/ai/.env")):
-    load_dotenv(_ai_env, override=False)
+# Never override: a value already in the environment was put there
+# deliberately -- by Railway, by compose's env_file, or by a test run that
+# just pointed us at a scratch database -- and this file carries the deployed
+# DATABASE_URL, so overriding used to be able to hand a test suite the real
+# one. Precedence between the two files is unchanged: backend/.env is loaded
+# first and dotenv keeps the first value it sees.
+for _env_file in (
+    _BACKEND_DIR / ".env",
+    _REPO_DIR / "ai" / ".env",
+    Path("/packages/ai/.env"),
+):
+    load_dotenv(_env_file, override=False)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
 logging.getLogger("clawops.agent").setLevel(logging.INFO)
 logging.getLogger(__name__).info(
@@ -26,7 +35,7 @@ logging.getLogger(__name__).info(
         for name in ("CLAWOPS_API_KEY", "CLAWOPS_ACCOUNT_ID", "CLAWOPS_SMS_FROM")
     )
     else "configuration missing",
-    os.getenv("CALL_SCENARIO", "voice_phishing_training"),
+    os.getenv("CALL_SCENARIO", "").strip() or "고정 시나리오 무작위 선택",
 )
 
 

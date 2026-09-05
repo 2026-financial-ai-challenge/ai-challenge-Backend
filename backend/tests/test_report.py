@@ -264,6 +264,75 @@ def test_score_conversation_falls_back_on_bad_json():
     assert report.source == "live"
 
 
+def test_report_llm_falls_back_to_gemini_when_openai_fails(monkeypatch):
+    """No explicit client (the real call path): OpenAI is tried first, and a
+    failure there (quota exhausted, auth revoked, ...) must not lose the
+    report -- it should fall through to Gemini rather than degrading straight
+    to the heuristic report."""
+    monkeypatch.setattr(
+        report_service,
+        "_report_llm_attempts",
+        lambda: [("OpenAI", "openai-client", "gpt-4o-mini"), ("Gemini", "gemini-client", "gemini-x")],
+    )
+    calls: list[str] = []
+
+    async def fake_completion(client, model, system, user_content):
+        calls.append(client)
+        if client == "openai-client":
+            raise RuntimeError("429 insufficient_quota")
+        return _llm_payload(summary="Gemini로 대체 생성된 요약")
+
+    monkeypatch.setattr(report_service, "_report_completion", fake_completion)
+
+    report = asyncio.run(
+        score_conversation(
+            "[상대] 성함을 말씀하십시오\n[훈련자] 확인해보겠습니다",
+            source="live",
+            client=None,
+        )
+    )
+    assert calls == ["openai-client", "gemini-client"]
+    assert report.summary == "Gemini로 대체 생성된 요약"
+
+
+def test_report_llm_degrades_to_heuristic_when_every_provider_fails(monkeypatch):
+    monkeypatch.setattr(
+        report_service,
+        "_report_llm_attempts",
+        lambda: [("OpenAI", "openai-client", "gpt-4o-mini"), ("Gemini", "gemini-client", "gemini-x")],
+    )
+
+    async def always_fails(client, model, system, user_content):
+        raise RuntimeError(f"{client} unavailable")
+
+    monkeypatch.setattr(report_service, "_report_completion", always_fails)
+
+    report = asyncio.run(
+        score_conversation(
+            "[상대] 성함을 말씀하십시오\n[훈련자] 지금은 끊겠습니다",
+            source="live",
+            client=None,
+        )
+    )
+    # score_conversation swallows the exhausted-provider error and still
+    # returns a usable (non-LLM) report rather than raising into the caller.
+    assert report.triedHangup is True
+
+
+def test_report_llm_raises_clearly_when_no_provider_is_configured(monkeypatch):
+    monkeypatch.setattr(report_service, "_report_llm_attempts", lambda: [])
+
+    report = asyncio.run(
+        score_conversation(
+            "[상대] 성함을 말씀하십시오\n[훈련자] 지금은 끊겠습니다",
+            source="live",
+            client=None,
+        )
+    )
+    # Still degrades gracefully -- callers never see the missing-key error.
+    assert report.triedHangup is True
+
+
 def test_draft_then_final_report(monkeypatch):
     session_id = _session_id()
     bind_call(session_id, "CAtest")

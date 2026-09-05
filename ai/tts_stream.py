@@ -111,6 +111,9 @@ async def _request_stream(
             raise RuntimeError(
                 f"ElevenLabs TTS failed ({response.status_code}): {body[:400]}{hint}"
             )
-        async for chunk in response.aiter_bytes(chunk_size=4096):
+        # No chunk_size: httpx would otherwise hold the first bytes until the
+        # buffer fills, and at pcm_24000 (48000 B/s) 4096 bytes is 85ms of
+        # audio we would be sitting on before playback could even start.
+        async for chunk in response.aiter_bytes():
             if chunk:
                 yield chunk

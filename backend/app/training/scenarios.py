@@ -30,10 +30,24 @@ def get_call_scenario():
 
 
 async def get_runtime_scenario():
-    """Return a per-call generated scenario when dynamic mode is enabled."""
-    base = get_call_scenario()
+    """Pick the scenario for one outbound training call.
+
+    Normally this is a fixed playbook from ai/scenarios/library.py, chosen at
+    random so consecutive calls differ, and it costs no LLM round trip. Pinning
+    CALL_SCENARIO to one id disables the rotation. Turning DYNAMIC_SCENARIO on
+    goes back to writing a fresh scenario with an LLM before every call, which
+    is slower by a generate call plus a review call.
+    """
+    ensure_ai_importable()
     from ai.scenarios.generator import dynamic_scenarios_enabled, generate_scenario
 
-    if not dynamic_scenarios_enabled():
-        return base
-    return await generate_scenario(base)
+    if dynamic_scenarios_enabled():
+        return await generate_scenario(get_call_scenario())
+
+    pinned = os.getenv("CALL_SCENARIO", "").strip()
+    if pinned:
+        return get_call_scenario()
+
+    from ai.scenarios import pick_scenario
+
+    return pick_scenario()

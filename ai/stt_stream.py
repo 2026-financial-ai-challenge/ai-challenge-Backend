@@ -22,6 +22,7 @@ from ai.config import (
     stt_endpointing_ms,
     stt_language,
     stt_sample_rate,
+    stt_utterance_end_ms,
 )
 
 _DEEPGRAM_URL = "wss://api.deepgram.com/v1/listen"
@@ -64,7 +65,10 @@ async def stream_stt(
             "punctuate": "true",
             "interim_results": "true",
             "endpointing": stt_endpointing_ms(),
-            "utterance_end_ms": "1200",
+            # Was hardcoded to 1200, which silently ignored STT_UTTERANCE_END_MS
+            # and made this harness read ~200ms more pessimistic than the phone
+            # pipeline it is supposed to model.
+            "utterance_end_ms": stt_utterance_end_ms(),
             "smart_format": "true",
             "vad_events": "true",
         }

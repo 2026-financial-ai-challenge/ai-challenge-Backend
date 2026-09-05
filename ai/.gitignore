@@ -7,3 +7,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+# Every variant too: .env.bak, .env.local, .env.production. Only the
+# bare name was ignored, and a real .env.bak-tts holding live
+# ElevenLabs/Deepgram keys sat here untracked and one `git add -A`
+# away from being committed. .env.example stays tracked on purpose.
+.env.*
+!.env.example

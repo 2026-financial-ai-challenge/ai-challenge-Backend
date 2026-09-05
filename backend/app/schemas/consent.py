@@ -33,3 +33,7 @@ class SessionResponse(BaseModel):
 
 class GetSessionResponse(BaseModel):
     session: SessionResponse
+
+
+class ListSessionsResponse(BaseModel):
+    sessions: list[SessionResponse]

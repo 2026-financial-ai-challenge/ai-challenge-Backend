@@ -47,6 +47,21 @@ def get_session(session_id: str) -> SessionResponse | None:
         return _to_response(session) if session is not None else None
 
 
+def list_sessions_for_participant(participant_id: int) -> list[SessionResponse]:
+    with SessionLocal() as db:
+        sessions = db.scalars(
+            select(TrainingSession)
+            .options(
+                selectinload(TrainingSession.consent),
+                selectinload(TrainingSession.participant),
+                selectinload(TrainingSession.calls),
+            )
+            .where(TrainingSession.participant_id == participant_id)
+            .order_by(TrainingSession.created_at.desc())
+        )
+        return [_to_response(session) for session in sessions]
+
+
 def session_exists(session_id: str) -> bool:
     with SessionLocal() as db:
         return db.get(TrainingSession, session_id) is not None

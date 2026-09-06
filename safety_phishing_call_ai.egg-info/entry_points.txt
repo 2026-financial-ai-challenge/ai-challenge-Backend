@@ -1,3 +1,0 @@
-[console_scripts]
-test-latency = ai.test_latency:main
-test-stt = ai.test_stt:main

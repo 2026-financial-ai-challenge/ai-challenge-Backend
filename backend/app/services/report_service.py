@@ -540,12 +540,32 @@ def _turn_schemas(rows: list[TranscriptTurnRecord]) -> list[TranscriptTurn]:
     return [TranscriptTurn(role=row.role, text=row.text) for row in rows]
 
 
+def _josa(word: str, with_batchim: str, without_batchim: str) -> str:
+    """Pick the Korean particle matching `word`'s trailing syllable's 받침."""
+    for char in reversed(word):
+        code = ord(char) - 0xAC00
+        if 0 <= code <= 11171:
+            return with_batchim if code % 28 != 0 else without_batchim
+    return with_batchim
+
+
 def _combine_reports(
     announced: TrainingReport | None,
     unannounced: TrainingReport | None,
 ) -> TrainingReport | None:
     if announced is None or unannounced is None:
         return None
+
+    announced_risk = {item.label for item in announced.riskBehaviors}
+    unannounced_risk = {item.label for item in unannounced.riskBehaviors}
+    resolved_risk = sorted(announced_risk - unannounced_risk)
+    repeated_risk = sorted(announced_risk & unannounced_risk)
+    new_risk = sorted(unannounced_risk - announced_risk)
+
+    announced_defense = {item.label for item in announced.defenseBehaviors}
+    unannounced_defense = {item.label for item in unannounced.defenseBehaviors}
+    new_defense = sorted(unannounced_defense - announced_defense)
+    lost_defense = sorted(announced_defense - unannounced_defense)
 
     score_delta = unannounced.score - announced.score
     if score_delta > 0:
@@ -555,39 +575,50 @@ def _combine_reports(
     else:
         change = "두 통화의 대응 점수가 같았어요."
 
-    def tagged(
-        prefix: str,
-        items: list[BehaviorItem],
-    ) -> list[BehaviorItem]:
-        return [
-            BehaviorItem(label=f"{prefix} · {item.label}", evidence=item.evidence)
-            for item in items
-        ]
+    summary_parts = [
+        f"1차 전화는 {announced.score}점, 불시 전화는 {unannounced.score}점이었습니다. {change}"
+    ]
+    if resolved_risk:
+        joined = ", ".join(resolved_risk)
+        summary_parts.append(
+            f"1차에서 나왔던 {joined}{_josa(joined, '은', '는')} 불시 전화에서 다시 나오지 않아 개선됐습니다."
+        )
+    if repeated_risk:
+        joined = ", ".join(repeated_risk)
+        summary_parts.append(
+            f"{joined}{_josa(joined, '은', '는')} 불시 전화에서도 반복돼 아직 개선이 필요합니다."
+        )
+    if new_risk:
+        joined = ", ".join(new_risk)
+        summary_parts.append(
+            f"불시 전화에서는 1차에 없던 {joined}{_josa(joined, '이', '가')} 새로 발견됐습니다."
+        )
+    if lost_defense:
+        summary_parts.append(
+            f"1차에서 보였던 {', '.join(lost_defense)} 방어 행동은 불시 전화에서 나타나지 않았습니다."
+        )
+    if new_defense:
+        summary_parts.append(
+            f"불시 전화에서 {', '.join(new_defense)} 방어 행동이 새로 나타났습니다."
+        )
+
+    if repeated_risk:
+        joined = ", ".join(repeated_risk)
+        coaching = f"{joined}{_josa(joined, '은', '는')} 두 통화 모두에서 나왔으니 이 부분부터 고쳐보세요."
+    elif new_risk:
+        coaching = f"불시 전화에서 새로 나온 {', '.join(new_risk)}에 대비한 대응을 연습해보세요."
+    else:
+        coaching = "반복되는 위험 행동이 없었어요. 지금의 대응을 계속 유지하세요."
 
     return TrainingReport(
         score=round((announced.score + unannounced.score) / 2),
         suspected=announced.suspected and unannounced.suspected,
         gaveName=announced.gaveName or unannounced.gaveName,
         triedHangup=announced.triedHangup and unannounced.triedHangup,
-        summary=(
-            f"1차 전화는 {announced.score}점, 불시 전화는 "
-            f"{unannounced.score}점이었습니다. {change} "
-            f"1차 분석: {announced.summary} "
-            f"불시 전화 분석: {unannounced.summary}"
-        ),
-        coaching=(
-            "두 통화에서 반복해서 지킬 수 있는 대응 습관을 만드는 것이 중요합니다. "
-            f"1차 코칭: {announced.coaching} "
-            f"불시 전화 코칭: {unannounced.coaching}"
-        ),
-        riskBehaviors=(
-            tagged("1차", announced.riskBehaviors)
-            + tagged("불시", unannounced.riskBehaviors)
-        ),
-        defenseBehaviors=(
-            tagged("1차", announced.defenseBehaviors)
-            + tagged("불시", unannounced.defenseBehaviors)
-        ),
+        summary=" ".join(summary_parts),
+        coaching=coaching,
+        riskBehaviors=unannounced.riskBehaviors,
+        defenseBehaviors=unannounced.defenseBehaviors,
         source="comparison",
     )
 

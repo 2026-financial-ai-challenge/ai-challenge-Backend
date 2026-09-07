@@ -20,6 +20,8 @@ def create_session(
     privacy: bool,
     unannounced_training: bool,
     participant_id: int | None = None,
+    *,
+    consented_at: datetime | None = None,
 ) -> SessionResponse:
     now = datetime.now(timezone.utc)
     with SessionLocal.begin() as db:
@@ -34,11 +36,20 @@ def create_session(
         session.consent = Consent(
             privacy_agreed=privacy,
             surprise_call_agreed=unannounced_training,
-            consented_at=now,
+            consented_at=consented_at or now,
         )
         db.add(session)
         db.flush()
         return _to_response(session)
+
+
+def create_session_for_participant(participant: Participant) -> SessionResponse:
+    return create_session(
+        privacy=participant.privacy_agreed,
+        unannounced_training=participant.surprise_call_agreed,
+        participant_id=participant.id,
+        consented_at=participant.consented_at,
+    )
 
 
 def get_session(session_id: str) -> SessionResponse | None:

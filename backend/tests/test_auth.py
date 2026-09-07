@@ -12,6 +12,7 @@ from app.services.session_service import reset_sessions
 
 PHONE = "01012345678"
 PASSWORD = "safePass123"
+CONSENT = {"privacy": True, "unannouncedTraining": True}
 
 
 @pytest.fixture
@@ -46,13 +47,20 @@ def test_signup_login_and_authenticated_consent(client, monkeypatch):
     token = _verify(http, sent)
     signup = http.post(
         "/v1/auth/signup",
-        json={"verificationToken": token, "password": PASSWORD},
+        json={"verificationToken": token, "password": PASSWORD, **CONSENT},
     )
     assert signup.status_code == 201
     body = signup.json()
     assert body["tokenType"] == "bearer"
     assert body["participant"]["phoneNumberMasked"] == "010-****-5678"
+    assert body["participant"]["hasConsented"] is True
     assert auth_service.decode_access_token(body["accessToken"]) == body["participant"]["id"]
+    with SessionLocal() as db:
+        stored = db.get(Participant, body["participant"]["id"])
+        assert stored is not None
+        assert stored.privacy_agreed is True
+        assert stored.surprise_call_agreed is True
+        assert stored.consented_at is not None
 
     login = http.post(
         "/v1/auth/login",
@@ -72,7 +80,7 @@ def test_signup_login_and_authenticated_consent(client, monkeypatch):
     response = http.post(
         "/v1/consents",
         headers={"Authorization": f"Bearer {access_token}"},
-        json={"privacy": True, "unannouncedTraining": True},
+        json={},
     )
     assert response.status_code == 200
     assert started == [(response.json()["sessionId"], PHONE)]
@@ -83,12 +91,12 @@ def test_verification_token_is_one_time(client):
     token = _verify(http, sent)
     first = http.post(
         "/v1/auth/signup",
-        json={"verificationToken": token, "password": PASSWORD},
+        json={"verificationToken": token, "password": PASSWORD, **CONSENT},
     )
     assert first.status_code == 201
     second = http.post(
         "/v1/auth/signup",
-        json={"verificationToken": token, "password": PASSWORD},
+        json={"verificationToken": token, "password": PASSWORD, **CONSENT},
     )
     assert second.status_code == 400
     assert second.json()["code"] == "VERIFICATION_TOKEN_USED"
@@ -133,13 +141,13 @@ def test_session_resources_are_owner_only(client, monkeypatch):
     token = _verify(http, sent)
     signup = http.post(
         "/v1/auth/signup",
-        json={"verificationToken": token, "password": PASSWORD},
+        json={"verificationToken": token, "password": PASSWORD, **CONSENT},
     ).json()
     owner_token = signup["accessToken"]
     session_id = http.post(
         "/v1/consents",
         headers={"Authorization": f"Bearer {owner_token}"},
-        json={"privacy": True, "unannouncedTraining": True},
+        json={},
     ).json()["sessionId"]
 
     with SessionLocal.begin() as db:
@@ -154,3 +162,66 @@ def test_session_resources_are_owner_only(client, monkeypatch):
     headers = {"Authorization": f"Bearer {stranger_token}"}
     assert http.get(f"/v1/sessions/{session_id}", headers=headers).status_code == 404
     assert http.get(f"/v1/sessions/{session_id}/report", headers=headers).status_code == 404
+
+
+def test_signup_requires_consent(client):
+    http, sent = client
+    token = _verify(http, sent)
+    missing = http.post(
+        "/v1/auth/signup",
+        json={"verificationToken": token, "password": PASSWORD},
+    )
+    assert missing.status_code == 422
+    refused = http.post(
+        "/v1/auth/signup",
+        json={
+            "verificationToken": token,
+            "password": PASSWORD,
+            "privacy": False,
+            "unannouncedTraining": True,
+        },
+    )
+    assert refused.status_code == 400
+    assert refused.json()["code"] == "CONSENT_REQUIRED"
+
+
+def test_existing_member_records_consent_on_first_training(client, monkeypatch):
+    http, _sent = client
+    from app.routers import consent
+
+    monkeypatch.setattr(consent, "start_training_calls", lambda *_args: None)
+    with SessionLocal.begin() as db:
+        participant = Participant(
+            phone_number=PHONE,
+            password_hash=auth_service.hash_password(PASSWORD),
+        )
+        db.add(participant)
+        db.flush()
+        token = auth_service.create_access_token(participant.id)
+
+    login = http.post(
+        "/v1/auth/login",
+        json={"phoneNumber": PHONE, "password": PASSWORD},
+    )
+    assert login.status_code == 200
+    assert login.json()["participant"]["hasConsented"] is False
+
+    empty = http.post(
+        "/v1/consents",
+        headers={"Authorization": f"Bearer {token}"},
+        json={},
+    )
+    assert empty.status_code == 400
+    assert empty.json()["code"] == "CONSENT_REQUIRED"
+
+    started = http.post(
+        "/v1/consents",
+        headers={"Authorization": f"Bearer {token}"},
+        json=CONSENT,
+    )
+    assert started.status_code == 200
+    with SessionLocal() as db:
+        stored = db.scalar(select(Participant).where(Participant.phone_number == PHONE))
+        assert stored is not None
+        assert stored.has_training_consent() is True
+        assert stored.consented_at is not None

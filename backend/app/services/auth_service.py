@@ -91,8 +91,17 @@ def verify_signup_otp(db: Session, phone: str, code: str) -> VerifySignupOtpResp
     return VerifySignupOtpResponse(verificationToken=token, expiresInSec=TOKEN_TTL_SEC)
 
 
-def signup(db: Session, verification_token: str, password: str) -> AuthResponse:
+def signup(
+    db: Session,
+    verification_token: str,
+    password: str,
+    *,
+    privacy: bool,
+    unannounced_training: bool,
+) -> AuthResponse:
     _validate_password(password)
+    if not privacy or not unannounced_training:
+        raise ApiError(400, "CONSENT_REQUIRED", "필수 동의 항목에 모두 동의해야 합니다.")
     token_hash = _digest(verification_token)
     challenge = db.scalar(
         select(PhoneVerification).where(PhoneVerification.verification_token_hash == token_hash).with_for_update()
@@ -112,6 +121,7 @@ def signup(db: Session, verification_token: str, password: str) -> AuthResponse:
         db.add(participant)
     participant.password_hash = hash_password(password)
     participant.phone_verified_at = now
+    record_training_consent(participant, now=now)
     participant.updated_at = now
     challenge.used_at = now
     db.commit()
@@ -164,11 +174,21 @@ def decode_access_token(token: str) -> int:
         raise ApiError(401, "INVALID_ACCESS_TOKEN", "로그인이 필요합니다.") from None
 
 
+def record_training_consent(participant: Participant, *, now: datetime | None = None) -> None:
+    now = now or _now()
+    participant.privacy_agreed = True
+    participant.surprise_call_agreed = True
+    if participant.consented_at is None:
+        participant.consented_at = now
+    participant.updated_at = now
+
+
 def _auth_response(participant: Participant) -> AuthResponse:
     return AuthResponse(accessToken=create_access_token(participant.id), expiresInSec=ACCESS_TOKEN_TTL_SEC,
         participant=AuthParticipant(
             id=participant.id,
             phoneNumberMasked=mask_phone_number(participant.phone_number),
+            hasConsented=participant.has_training_consent(),
         ))
 
 

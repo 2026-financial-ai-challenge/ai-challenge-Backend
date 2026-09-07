@@ -24,7 +24,13 @@ def verify_otp(body: VerifySignupOtpRequest, db: Session = Depends(get_db)):
 
 @router.post("/signup", response_model=AuthResponse, status_code=201)
 def create_account(body: SignupRequest, db: Session = Depends(get_db)):
-    return signup(db, body.verificationToken, body.password)
+    return signup(
+        db,
+        body.verificationToken,
+        body.password,
+        privacy=body.privacy,
+        unannounced_training=body.unannouncedTraining,
+    )
 
 
 @router.post("/login", response_model=AuthResponse)

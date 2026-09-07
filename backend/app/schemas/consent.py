@@ -5,8 +5,8 @@ from pydantic import BaseModel
 
 
 class SubmitConsentRequest(BaseModel):
-    privacy: bool
-    unannouncedTraining: bool
+    privacy: bool | None = None
+    unannouncedTraining: bool | None = None
 
 
 class SubmitConsentResponse(BaseModel):

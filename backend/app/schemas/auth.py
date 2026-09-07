@@ -25,6 +25,8 @@ class VerifySignupOtpResponse(BaseModel):
 class SignupRequest(BaseModel):
     verificationToken: str
     password: str = Field(min_length=8, max_length=128)
+    privacy: bool
+    unannouncedTraining: bool
 
 
 class LoginRequest(BaseModel):
@@ -35,6 +37,7 @@ class LoginRequest(BaseModel):
 class AuthParticipant(BaseModel):
     id: int
     phoneNumberMasked: str
+    hasConsented: bool
 
 
 class AuthResponse(BaseModel):

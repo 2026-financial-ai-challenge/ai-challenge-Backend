@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: phishing-call-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ../ai:/packages/ai
+    env_file:
+      - .env
+    environment:
+      UVICORN_RELOAD: "1"
+    command: sh start.sh
+  db:
+    image: postgres:16
+    container_name: safety-phishing-db
+    environment:
+      POSTGRES_DB: safety_phishing_call
+      POSTGRES_USER: safety_phishing_user
+      POSTGRES_PASSWORD: "${LOCAL_DB_PASSWORD:-local_dev_password}"
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U safety_phishing_user -d safety_phishing_call"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
+    name: backend_postgres_data

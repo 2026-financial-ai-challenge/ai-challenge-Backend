@@ -1,0 +1,41 @@
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, DateTime, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
+
+
+class Participant(Base):
+    __tablename__ = "participants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    phone_number: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    phone_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    privacy_agreed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    surprise_call_agreed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    consented_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    sessions: Mapped[list["TrainingSession"]] = relationship(
+        back_populates="participant"
+    )
+
+    def has_training_consent(self) -> bool:
+        return bool(self.privacy_agreed and self.surprise_call_agreed)

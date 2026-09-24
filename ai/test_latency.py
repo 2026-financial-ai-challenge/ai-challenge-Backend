@@ -46,7 +46,6 @@ from ai.conversation_pipeline import (
     speak_text,
 )
 from ai.scenarios import get_scenario
-from ai.scenarios.generator import dynamic_scenarios_enabled, generate_scenario
 
 _ECHO_TAIL_SECONDS = 0.25
 
@@ -110,8 +109,6 @@ def _print_partial(text: str) -> None:
 
 async def _async_main(args: argparse.Namespace) -> int:
     scenario = get_scenario(args.scenario)
-    if dynamic_scenarios_enabled():
-        scenario = await generate_scenario(scenario)
     sink = _make_sink(args.no_play)
     history: list[ChatMessage] = [
         {"role": "assistant", "content": scenario.opening_line},

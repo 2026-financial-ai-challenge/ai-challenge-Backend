@@ -15,9 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ai.safety import SAFETY_RULES
+from ai.scenarios.script import ScriptReply
 from ai.scenarios.types import Scenario
 
-__all__ = ["Playbook", "build_system_prompt"]
+__all__ = ["Playbook", "ScriptReply", "build_system_prompt"]
 
 
 # Every sentence still has to end in punctuation the pipeline can split on
@@ -70,6 +71,11 @@ class Playbook:
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
     tts_voice_id: str | None = None
+    # Pre-written lines for the script call mode. Unlike turn_plan these ARE
+    # spoken verbatim, so each one must read as a finished caller line: one
+    # or two short sentences that fit wherever that step or intent comes up.
+    progression: tuple[str, ...] = ()
+    script: tuple[ScriptReply, ...] = ()
 
 
 def build_system_prompt(playbook: Playbook) -> str:
@@ -122,4 +128,6 @@ def to_scenario(playbook: Playbook) -> Scenario:
         ideal_trainee_response=playbook.ideal_trainee_response,
         quick_replies=playbook.quick_replies,
         hangup_line=playbook.hangup_line,
+        progression=playbook.progression,
+        script=playbook.script,
     )

@@ -41,16 +41,22 @@ logging.getLogger(__name__).info(
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    from app.services.data_retention import (
+        start_retention_scheduler,
+        stop_retention_scheduler,
+    )
     from app.services.training_scheduler import (
         start_training_scheduler,
         stop_training_scheduler,
     )
 
     start_training_scheduler()
+    start_retention_scheduler()
     try:
         yield
     finally:
         stop_training_scheduler()
+        stop_retention_scheduler()
 
 
 app = FastAPI(lifespan=lifespan)

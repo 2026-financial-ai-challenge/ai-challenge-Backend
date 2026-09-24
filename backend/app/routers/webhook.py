@@ -29,6 +29,45 @@ _EVENT_REQUIRED_FIELDS = {
 }
 
 
+def _webhook_url(request: Request) -> str:
+    """The URL ClawOps signed. Behind a proxy request.url is not it."""
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if public_base_url:
+        return f"{public_base_url}{request.url.path}"
+    return str(request.url)
+
+
+@router.post("/status", status_code=status.HTTP_204_NO_CONTENT)
+async def receive_call_status_webhook(request: Request) -> Response:
+    """Call status for managed-agent calls (CALL_AGENT_MODE=managed).
+
+    Only CallId is read from the body. ClawOps does not publish a schema for
+    this payload, and the call's own API record is typed, so the callback is
+    treated as a trigger and the status is fetched rather than parsed.
+    """
+    body = await request.body()
+    params = dict(parse_qsl(body.decode(), keep_blank_values=True))
+    call_id = params.get("CallId", "").strip()
+    if not call_id:
+        raise HTTPException(status_code=400, detail="Missing required field: CallId")
+
+    if not verify_clawops_signature(
+        url=_webhook_url(request),
+        params=params,
+        signature=request.headers.get("X-Signature"),
+    ):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    logger.info("Received ClawOps status webhook: call_id=%s", call_id)
+    try:
+        from app.services.call_service import handle_call_status_event
+
+        await handle_call_status_event(call_id)
+    except Exception:
+        logger.exception("Failed to apply call status: call_id=%s", call_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/transcript", status_code=status.HTTP_204_NO_CONTENT)
 async def receive_transcript_webhook(request: Request) -> Response:
     body = await request.body()
@@ -45,14 +84,8 @@ async def receive_transcript_webhook(request: Request) -> Response:
             detail=f"Missing required fields: {', '.join(sorted(missing))}",
         )
 
-    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
-    webhook_url = (
-        f"{public_base_url}{request.url.path}"
-        if public_base_url
-        else str(request.url)
-    )
     if not verify_clawops_signature(
-        url=webhook_url,
+        url=_webhook_url(request),
         params=params,
         signature=request.headers.get("X-Signature"),
     ):

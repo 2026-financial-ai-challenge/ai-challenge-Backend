@@ -103,10 +103,8 @@ def _require_env(name: str) -> str:
 def _call_llm_provider() -> str:
     """Which LLM answers the trainee during the live call.
 
-    'openai' (default) or 'gemini'. Independent from SCENARIO_LLM_PROVIDER
-    (ai/scenarios/generator.py) — that one only writes the scenario before
-    the call starts; this one drives in-call responses, so a quota-exhausted
-    OpenAI key can be swapped out for both without touching the other.
+    'openai' (default) or 'gemini'. When both keys are set the other one is
+    the automatic fallback for a turn (see _build_call_llm).
     """
     return os.getenv("CALL_LLM_PROVIDER", "openai").strip().lower() or "openai"
 
@@ -186,24 +184,76 @@ def phone_system_prompt(scenario) -> str:
     )
 
 
-def build_pipeline_session(scenario):
+def _script_mode() -> str:
+    """How the script call mode runs (ai/scenarios/script.py).
+
+    off    -- every turn goes to the live LLM (plus the reflex table)
+    shadow -- same, but each turn logs what the script WOULD have said; this
+              is the log `python -m ai.script_eval --logs` turns into a hit rate
+    on     -- turns the script is sure about are answered from pre-written,
+              pre-synthesized lines; everything else goes to the live LLM
+    """
+    mode = os.getenv("CALL_SCRIPT_MODE", "shadow").strip().lower()
+    return mode if mode in {"off", "shadow", "on"} else "shadow"
+
+
+def _prerender_spec(scenario, voice_id: str):
+    from ai.prerender import voice_spec_for
+
+    return voice_spec_for(scenario, voice_id)
+
+
+# Keeps background prerender tasks referenced until they finish; asyncio only
+# holds weak references to tasks.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _start_prerender(scenario, voice_id: str) -> None:
+    """Synthesize this call's fixed lines while the phone rings.
+
+    Best effort and off the critical path: a line that is not ready when its
+    turn comes is spoken through the live TTS as before.
+    """
+    if os.getenv("CALL_PRERENDER", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    from ai.prerender import ensure_lines, scenario_lines
+
+    lines = scenario_lines(scenario, include_script=_script_mode() == "on")
+    spec = _prerender_spec(scenario, voice_id)
+    try:
+        task = asyncio.get_running_loop().create_task(ensure_lines(spec, lines))
+    except RuntimeError:
+        return  # no running loop (sync caller); nothing to warm
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def build_pipeline_session(scenario, *, voice_id: str | None = None):
     try:
         from clawops.agent.pipeline import (
             DeepgramSTT,
             ElevenLabsTTS,
-            GeminiLLM,
-            OpenAILLM,
         )
         from app.training.deepgram_stt import PhoneDeepgramSTT
         from app.training.gemini_llm import PhoneGeminiLLM
+        from app.training.openai_llm import PhoneOpenAILLM
         from app.training.pipeline_session import PhonePipelineSession
     except ImportError as exc:
         raise CallConfigurationError(
             "ClawOps pipeline extras are missing; rebuild with "
             "clawops[agent,openai,gemini,deepgram,elevenlabs]"
         ) from exc
+    from ai.harness import CallMonitor, GuardedLLM
+    from ai.prerender import default_cache
+    from ai.scenarios.script import ScriptRouter
 
-    voice_id = _tts_voice_id(scenario)
+    voice_id = voice_id or _tts_voice_id(scenario)
+    monitor = CallMonitor(
+        scenario_id=getattr(scenario, "id", ""),
+        hangup_line=getattr(scenario, "hangup_line", ""),
+    )
+    spec = _prerender_spec(scenario, voice_id)
+    cache = default_cache()
 
     # Built separately so we can see which naturalness settings the installed
     # ClawOps ElevenLabsTTS actually accepts. _supported_kwargs() drops unknown
@@ -252,14 +302,19 @@ def build_pipeline_session(scenario):
                 # Deepgram's speech_final, which fires after this much silence
                 # (see UtteranceAssembler in app/training/deepgram_stt.py), so
                 # perceived latency is floored here -- not at utterance_end_ms.
-                # 250-300 is noticeably snappier; too low cuts off slow speakers.
-                endpointing=int(os.getenv("STT_ENDPOINTING_MS", "400")),
+                # 300 (was 400) takes 100 ms off every turn; a slow speaker's
+                # mid-sentence pause is folded back in by continues_previous_turn,
+                # so cutting a little early costs a merged turn, not a lost one.
+                endpointing=int(os.getenv("STT_ENDPOINTING_MS", "300")),
                 # Backstop only, for the case where Deepgram never sends
                 # speech_final. It bounds the worst turn, not the typical one.
                 utterance_end_ms=int(os.getenv("STT_UTTERANCE_END_MS", "1000")),
             )
         ),
-        llm=_build_call_llm(PhoneGeminiLLM, OpenAILLM),
+        # Every sentence the model says passes the runtime harness first
+        # (ai/harness.py): persona breaks, real institution names and requests
+        # for secrets are dropped before TTS, whatever the prompt achieved.
+        llm=GuardedLLM(_build_call_llm(PhoneGeminiLLM, PhoneOpenAILLM), monitor=monitor),
         tts=ElevenLabsTTS(**tts_kwargs),
         greeting=True,
         opening_line=scenario.opening_line,
@@ -268,6 +323,11 @@ def build_pipeline_session(scenario):
         hangup_line=getattr(scenario, "hangup_line", ""),
         reflex_budget=int(os.getenv("CALL_REFLEX_BUDGET", "3")),
         stall_line=os.getenv("CALL_STALL_LINE", "").strip(),
+        monitor=monitor,
+        script_router=ScriptRouter.for_scenario(scenario),
+        script_mode=_script_mode(),
+        prerendered=lambda text: cache.get(spec, text),
+        scenario_id=getattr(scenario, "id", ""),
     )
     return PhonePipelineSession(**session_kwargs)
 
@@ -282,8 +342,8 @@ def _call_max_tokens(provider: str) -> int:
     Gemini gets a much higher ceiling on purpose. Gemini counts hidden
     thinking tokens against the output budget, so a tight cap can be spent
     entirely on reasoning and return empty content -- which on a phone call
-    is dead silence, not a slow answer. ai/scenarios/generator.py:31-34
-    records exactly that ("sometimes empty content") on non-lite models.
+    is dead silence, not a slow answer ("sometimes empty content" was
+    observed on non-lite models).
     Length is already controlled by the prompt rule in
     ai/scenarios/playbook.py ("짧은 문장 두 개까지"), so the high cap costs
     nothing in practice. Drop it once you have confirmed from usage metadata
@@ -408,14 +468,18 @@ def _make_clawops_agent(from_number: str, scenario):
             "ClawOps Agent SDK is not installed; rebuild the backend image"
         ) from exc
 
+    # Resolved once per call: with ELEVENLABS_VOICE_RANDOM the session and the
+    # prerendered lines must still agree on who is speaking.
+    voice_id = _tts_voice_id(scenario)
+    _start_prerender(scenario, voice_id)
     kwargs = {
         "from_": from_number,
         "builtin_tools": [BuiltinTool.HANG_UP],
     }
     if "session_factory" in inspect.signature(ClawOpsAgent).parameters:
-        kwargs["session_factory"] = lambda: build_pipeline_session(scenario)
+        kwargs["session_factory"] = lambda: build_pipeline_session(scenario, voice_id=voice_id)
     else:
-        kwargs["session"] = build_pipeline_session(scenario)
+        kwargs["session"] = build_pipeline_session(scenario, voice_id=voice_id)
     return ClawOpsAgent(**_supported_kwargs(ClawOpsAgent, **kwargs))
 
 
@@ -483,12 +547,8 @@ async def _create_outbound_call(session_id: str):
     _require_call_llm_key()
 
     try:
-        # Normally instant: a fixed playbook is picked in process. The timeout
-        # only bites when DYNAMIC_SCENARIO is on and an LLM is writing one.
-        scenario = await asyncio.wait_for(
-            get_runtime_scenario(),
-            timeout=float(os.getenv("SCENARIO_GENERATION_TIMEOUT_SEC", "20")),
-        )
+        # Instant: a fixed playbook is picked in process.
+        scenario = await get_runtime_scenario()
     except Exception:
         logger.exception("Scenario selection failed; using the default scenario")
         try:

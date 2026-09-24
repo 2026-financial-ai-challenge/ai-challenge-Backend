@@ -55,6 +55,7 @@ __all__ = [
     "OutputGuard",
     "SAFETY_EXIT_LINE",
     "SECRET_REDIRECT_LINE",
+    "audit_transcript",
     "redact_numbers",
 ]
 
@@ -370,6 +371,42 @@ class GuardedLLM:
 
         if self._monitor is not None and self.turn_sentences:
             self._monitor.observe_assistant(" ".join(self.turn_sentences))
+
+
+# ── post-call audit (managed agents) ───────────────────────────────────────
+
+# The one line allowed to name the exercise: the emergency exit in
+# ai/managed_agent.py. Seeing it is an event to record, not a violation.
+_SAFETY_EXIT_MARK = re.compile(r"사전에\s*동의하신\s*보이스피싱\s*대응\s*훈련")
+
+
+def audit_transcript(agent_texts: list[str]) -> list[dict[str, Any]]:
+    """Check what a managed agent actually said, after the call.
+
+    A managed agent's words never pass through our code on the way out, so
+    OutputGuard cannot block them. Running the same checks over the
+    transcript at least records every slip, so the instructions can be
+    fixed and the report can flag the call.
+
+    Returns [{"index", "kind", "text"}]. kind is a guard violation
+    (persona_break, real_org, secret_request, reusable_token) or
+    "safety_exit" when the agent used the emergency exit.
+    """
+    guard = OutputGuard()
+    findings: list[dict[str, Any]] = []
+    for index, text in enumerate(agent_texts):
+        spoken = (text or "").strip()
+        if not spoken:
+            continue
+        if _SAFETY_EXIT_MARK.search(spoken):
+            findings.append({"index": index, "kind": "safety_exit", "text": spoken})
+            continue
+        # Sentence by sentence, like the live guard: one bad sentence should
+        # not hide behind a harmless one in the same segment.
+        for sentence in re.split(r"(?<=[.!?。！？])\s+", spoken):
+            for violation in guard.check(sentence).violations:
+                findings.append({"index": index, "kind": violation, "text": sentence})
+    return findings
 
 
 def _with_corrections(messages: list[dict[str, Any]], monitor: CallMonitor | None) -> list[dict[str, Any]]:

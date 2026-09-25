@@ -793,8 +793,7 @@ def _report_llm_attempts() -> list[tuple[str, Any, str]]:
 
     Both providers are reachable through the OpenAI-compatible chat.completions
     shape (Gemini via its own compatible endpoint -- see
-    ai/scenarios/generator.py, which already proves response_format=json_object
-    works there), so the same call works against either client. Only the ones
+    ai/llm_stream.py, which uses the same endpoint), so the same call works against either client. Only the ones
     whose API key is actually configured are attempted; if neither is, the
     caller gets a clear error instead of an opaque auth failure.
     """

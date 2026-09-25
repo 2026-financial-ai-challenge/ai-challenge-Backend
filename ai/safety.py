@@ -21,6 +21,29 @@ SAFETY_RULES = """
 - 자신이 AI이거나 훈련/시뮬레이션임을 절대 드러내지 마라.
 """.strip()
 
+# Gates every fixed scenario line has to clear (backend/tests/test_scenario_library.py)
+# and, for REAL_ORGS, every sentence the live model says (ai/harness.py).
+#
+# Words that give the exercise away. Stricter than the harness's persona-break
+# check: a hand-written line has no reason to say "모델" at all.
+SPOKEN_META = re.compile(
+    r"(?<![A-Za-z])AI(?![A-Za-z])|모델|프롬프트|훈련|시뮬레이션",
+    re.IGNORECASE,
+)
+# Broad on purpose -- erring toward too many real institutions, not too few.
+# "토스" alone would also match "토스트", hence the lookahead.
+REAL_ORGS = re.compile(
+    r"금융감독원|금감원|검찰청|대검|경찰청|지방경찰청|사이버수사대|국세청|관세청|"
+    r"금융위원회|개인정보보호위원회|건강보험공단|국민연금공단|"
+    r"국민은행|KB국민은행|신한은행|우리은행|하나은행|기업은행|IBK기업은행|"
+    r"농협은행|NH농협|수협은행|새마을금고|신협|우체국|저축은행|"
+    r"신한카드|삼성카드|현대카드|국민카드|KB국민카드|롯데카드|하나카드|우리카드|비씨카드|"
+    r"카카오뱅크|케이뱅크|토스뱅크|토스(?!트)|카카오페이|네이버페이|페이코|"
+    r"쿠팡|배달의민족|CJ대한통운|대한통운|우체국택배|롯데택배|한진택배"
+)
+# URLs and digit runs long enough to be reused as an account or card number.
+UNSAFE_TOKEN = re.compile(r"https?://|www\.|\d{6,}", re.IGNORECASE)
+
 # Consecutive digits long enough to look like an account, card, or phone fragment.
 _LONG_DIGITS = re.compile(r"\d{6,}")
 _URL = re.compile(r"(https?://\S+|www\.\S+)", re.IGNORECASE)

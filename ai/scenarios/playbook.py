@@ -15,9 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ai.safety import SAFETY_RULES
+from ai.scenarios.script import ScriptReply
 from ai.scenarios.types import Scenario
 
-__all__ = ["Playbook", "build_system_prompt"]
+__all__ = ["Playbook", "ScriptReply", "build_scenario_block", "build_system_prompt"]
 
 
 # Every sentence still has to end in punctuation the pipeline can split on
@@ -70,17 +71,29 @@ class Playbook:
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
     tts_voice_id: str | None = None
+    # Pre-written lines for the script call mode. Unlike turn_plan these ARE
+    # spoken verbatim, so each one must read as a finished caller line: one
+    # or two short sentences that fit wherever that step or intent comes up.
+    progression: tuple[str, ...] = ()
+    script: tuple[ScriptReply, ...] = ()
 
 
 def build_system_prompt(playbook: Playbook) -> str:
     """Compile a playbook into the system prompt for the live call."""
+    return "\n\n".join([SAFETY_RULES, _STYLE_RULES, build_scenario_block(playbook)]).strip()
+
+
+def build_scenario_block(playbook: Playbook) -> str:
+    """The scenario-specific part of the prompt, without the shared rules.
+
+    The managed-agent path (ai/managed_agent.py) keeps the shared rules on the
+    agent itself and sends only this block per call, as its CallContext.
+    """
     plan = "\n".join(
         f"{index}. {step}" for index, step in enumerate(playbook.turn_plan, 1)
     )
     objections = "\n".join(f"- {item}" for item in playbook.objection_handling)
     sections = [
-        SAFETY_RULES,
-        _STYLE_RULES,
         f"""[역할]
 {playbook.role}
 교육용 가상 인물이지만 상대가 눈치채지 못하게 끝까지 역할을 유지한다.
@@ -122,4 +135,6 @@ def to_scenario(playbook: Playbook) -> Scenario:
         ideal_trainee_response=playbook.ideal_trainee_response,
         quick_replies=playbook.quick_replies,
         hangup_line=playbook.hangup_line,
+        progression=playbook.progression,
+        script=playbook.script,
     )

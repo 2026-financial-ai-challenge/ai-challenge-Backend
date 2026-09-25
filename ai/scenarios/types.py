@@ -31,3 +31,8 @@ class Scenario:
     # Last line before hanging up on a second "I'm hanging up". Kept on the
     # scenario so the phone pipeline stops hardcoding one scenario's amount.
     hangup_line: str = ""
+    # Pre-written caller lines for the script call mode (ai/scenarios/script.py):
+    # the ordered backbone, and ScriptReply answers keyed by trainee intent.
+    # Empty on a generated scenario, which then runs on the live LLM only.
+    progression: tuple[str, ...] = ()
+    script: tuple = ()

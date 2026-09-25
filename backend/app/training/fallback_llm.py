@@ -64,6 +64,13 @@ class FallbackLLM:
     def _max_tokens(self) -> int:
         return getattr(self._primary, "_max_tokens", 0)
 
+    async def warm(self) -> None:
+        # Only the primary: it answers every turn unless it fails, and warming
+        # the secondary would spend a request on a path that is rarely taken.
+        warm = getattr(self._primary, "warm", None)
+        if callable(warm):
+            await warm()
+
     async def generate(
         self,
         messages: list[dict[str, Any]],

@@ -3,6 +3,7 @@ import inspect
 import logging
 import os
 from datetime import datetime, timezone
+from secrets import choice
 from threading import Lock, Thread
 
 from sqlalchemy import select
@@ -16,6 +17,7 @@ from app.services.report_service import (
     get_report,
     register_transcript_listener,
     request_clawops_transcript,
+    session_id_for_call,
 )
 from app.services.session_service import (
     attach_call,
@@ -483,10 +485,192 @@ def _make_clawops_agent(from_number: str, scenario):
     return ClawOpsAgent(**_supported_kwargs(ClawOpsAgent, **kwargs))
 
 
+def _call_agent_mode() -> str:
+    """Which engine drives the live conversation.
+
+    'managed' (default) hands the whole call to a ClawOps console agent: the
+    prompt, the knowledge and the voice all live in the console, and ClawOps
+    runs the conversation server-side. Nothing from ai/scenarios or
+    app/training/ is involved.
+
+    The other two keep the in-process Agent SDK paths reachable. 'realtime'
+    lets a provider realtime model answer with the scenario prompt from
+    ai/scenarios; 'pipeline' runs the in-house Deepgram + LLM + ElevenLabs
+    chain in app/training/. Both stay in place so switching back is one
+    variable, not a rewrite.
+    """
+    mode = os.getenv("CALL_AGENT_MODE", "managed").strip().lower() or "managed"
+    if mode not in {"managed", "realtime", "pipeline"}:
+        logger.warning("Unknown CALL_AGENT_MODE=%s; using managed", mode)
+        return "managed"
+    return mode
+
+
 def _pipeline_configured() -> bool:
     return all(
         os.getenv(name, "").strip()
         for name in ("DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY")
+    )
+
+
+def _make_call_agent(from_number: str, scenario):
+    """Build an in-process Agent SDK agent. Managed mode never gets here."""
+    if _call_agent_mode() != "pipeline":
+        return _make_realtime_agent(from_number, scenario)
+    if not _pipeline_configured():
+        logger.warning(
+            "CALL_AGENT_MODE=pipeline needs DEEPGRAM_API_KEY and "
+            "ELEVENLABS_API_KEY; using the realtime agent instead"
+        )
+        return _make_realtime_agent(from_number, scenario)
+    return _make_clawops_agent(from_number, scenario)
+
+
+# Terminal statuses plus in-progress: every one of them moves the session.
+_STATUS_CALLBACK_EVENTS = (
+    "in-progress completed no-answer busy failed canceled rejected"
+)
+_MISSED_STATUSES = {"no-answer", "busy", "rejected", "canceled"}
+_RINGING_STATUSES = {"queued", "ringing", "in-progress"}
+
+_last_agent_id: str | None = None
+
+
+def _managed_agent_ids() -> list[str]:
+    """Console agent ids for managed mode. Empty until they are configured.
+
+    Empty is not an error here: _create_outbound_call falls back to the
+    in-process agent so calls keep going out while the ids are still being
+    collected from the console.
+    """
+    raw = os.getenv("CLAWOPS_AGENT_IDS", "").strip()
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _pick_agent_id() -> str:
+    """One console agent per call, avoiding an immediate repeat.
+
+    Mirrors ai/scenarios.pick_scenario: a trainee who takes the announced call
+    and then the unannounced one should not be handed the same scam twice.
+    Each console agent carries its own prompt and knowledge, so rotating the
+    id is what rotates the scenario now.
+    """
+    global _last_agent_id
+
+    ids = _managed_agent_ids()
+    pool = [agent_id for agent_id in ids if agent_id != _last_agent_id] or ids
+    picked = choice(pool)
+    _last_agent_id = picked
+    return picked
+
+
+def _status_callback_url() -> str:
+    base = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        logger.warning(
+            "PUBLIC_BASE_URL is not set, so ClawOps has nowhere to report call "
+            "status: sessions stay at 'calling' and no unannounced training is "
+            "queued once the call ends"
+        )
+        return ""
+    return f"{base}/v1/webhooks/clawops/status"
+
+
+async def _start_managed_call(phone_number: str, from_number: str):
+    """Hand the whole call to a ClawOps console agent.
+
+    No session, no media websocket, no local prompt: ClawOps runs the
+    conversation and we learn how it went from the status and transcript
+    webhooks.
+    """
+    from app.services.report_service import _clawops_calls
+
+    agent_id = _pick_agent_id()
+    kwargs = {
+        "to": phone_number,
+        "from_": from_number,
+        "agent_id": agent_id,
+        "timeout": 30,
+    }
+    callback = _status_callback_url()
+    if callback:
+        kwargs["status_callback"] = callback
+        kwargs["status_callback_event"] = _STATUS_CALLBACK_EVENTS
+
+    calls = _clawops_calls()
+    logger.info("Call agent: ClawOps managed console agent=%s", agent_id)
+    return await asyncio.to_thread(lambda: calls.create(**kwargs))
+
+
+async def handle_call_status_event(call_id: str) -> None:
+    """Managed-mode replacement for _monitor_call.
+
+    The callback body only says which call changed, so the status is read back
+    from the API, whose Call model is typed and versioned -- the webhook
+    payload shape is not.
+
+    Unlike _monitor_call this cannot tell a connected-but-silent call from a
+    real conversation: the turns arrive later on the transcript webhook, not
+    by the time the call ends. A connected call is therefore 'completed' here,
+    and the transcript webhook settles the report.
+    """
+    session_id = session_id_for_call(call_id)
+    if session_id is None:
+        logger.info("No training session for ClawOps call_id=%s", call_id)
+        return
+
+    from app.services.report_service import _clawops_calls
+
+    call = await asyncio.to_thread(lambda: _clawops_calls().get(call_id))
+    status_name = (getattr(call, "status", "") or "").strip()
+
+    if status_name in _RINGING_STATUSES:
+        update_call_status(session_id, "calling")
+        return
+
+    if status_name == "completed":
+        update_call_status(session_id, "completed")
+        _complete_call(call_id)
+        _complete_scheduled_training(session_id)
+        try:
+            from app.services.training_scheduler import (
+                schedule_unannounced_training,
+            )
+
+            schedule_unannounced_training(session_id)
+        except Exception:
+            logger.exception(
+                "Unannounced training scheduling failed: session_id=%s",
+                session_id,
+            )
+        try:
+            await request_clawops_transcript(call_id)
+        except Exception:
+            logger.exception(
+                "ClawOps transcript request failed: session_id=%s",
+                session_id,
+            )
+        return
+
+    if status_name in _MISSED_STATUSES:
+        update_call_status(session_id, "missed")
+        _fail_call(call_id, status_name)
+        update_report_status(session_id, "none")
+        _retry_scheduled_training(session_id, f"call_{status_name}")
+        logger.info(
+            "Training call missed session=%s status=%s", session_id, status_name
+        )
+        return
+
+    update_call_status(session_id, "failed")
+    _fail_call(call_id, getattr(call, "hangup_cause", None) or status_name or "unknown")
+    update_report_status(session_id, "none")
+    _retry_scheduled_training(session_id, "call_failed")
+    logger.warning(
+        "Training call failed session=%s status=%s cause=%s",
+        session_id,
+        status_name,
+        getattr(call, "hangup_cause", None),
     )
 
 
@@ -503,30 +687,46 @@ def _make_realtime_agent(from_number: str, scenario):
             "with clawops[agent,openai,gemini]"
         ) from exc
 
-    logger.warning(
-        "DEEPGRAM_API_KEY or ELEVENLABS_API_KEY is missing; "
-        "falling back to %s Realtime",
-        provider,
-    )
     if provider == "gemini":
-        session = GeminiRealtime(
+        session_cls = GeminiRealtime
+        requested = dict(
             api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
             system_prompt=scenario.system_prompt,
             voice=os.getenv("CLAWOPS_GEMINI_VOICE", "Kore"),
             language="ko",
         )
     else:
-        session = OpenAIRealtime(
+        session_cls = OpenAIRealtime
+        requested = dict(
             system_prompt=scenario.system_prompt,
             voice=os.getenv("CLAWOPS_VOICE", "marin"),
             language="ko",
         )
-    return ClawOpsAgent(from_=from_number, session=session)
+
+    # Same trap as ElevenLabsTTS above: _supported_kwargs() drops what the
+    # installed build does not accept, and a silently dropped `voice` is a
+    # call that goes out in the wrong voice with nothing in the log to say so.
+    kwargs = _supported_kwargs(session_cls, **requested)
+    dropped = sorted(set(requested) - set(kwargs))
+    if dropped:
+        logger.warning(
+            "%s ignored unsupported settings: %s "
+            "(the installed clawops build does not accept them)",
+            session_cls.__name__,
+            ", ".join(dropped),
+        )
+    logger.info(
+        "Call agent: ClawOps %s Realtime voice=%s",
+        provider,
+        requested.get("voice"),
+    )
+    return ClawOpsAgent(from_=from_number, session=session_cls(**kwargs))
 
 
 async def start_outbound_call(session_id: str) -> str:
     agent, call_session, scenario = await _create_outbound_call(session_id)
-    asyncio.create_task(_monitor_call(session_id, agent, call_session, scenario))
+    if agent is not None:
+        asyncio.create_task(_monitor_call(session_id, agent, call_session, scenario))
     return call_session.call_id
 
 
@@ -544,6 +744,28 @@ async def _create_outbound_call(session_id: str):
     _require_env("CLAWOPS_API_KEY")
     _require_env("CLAWOPS_ACCOUNT_ID")
     from_number = _outbound_phone_number(session.currentTrainingType)
+
+    if _call_agent_mode() == "managed" and not _managed_agent_ids():
+        logger.warning(
+            "CALL_AGENT_MODE=managed but CLAWOPS_AGENT_IDS is empty, so there "
+            "is no console agent to hand the call to; using the in-process "
+            "agent for this call"
+        )
+    elif _call_agent_mode() == "managed":
+        # Nothing below this point applies: the console agent owns the prompt,
+        # so no scenario is picked and no LLM key of ours is involved. There is
+        # also no agent object to monitor or disconnect -- the status and
+        # transcript webhooks carry the call from here.
+        call = await _start_managed_call(phone_number, from_number)
+        bind_call(session_id, call.call_id)
+        attach_call(session_id, call.call_id)
+        logger.info(
+            "Started managed call session=%s call_id=%s",
+            session_id,
+            call.call_id,
+        )
+        return None, call, None
+
     _require_call_llm_key()
 
     try:
@@ -564,11 +786,7 @@ async def _create_outbound_call(session_id: str):
         scenario.id,
     )
 
-    agent = (
-        _make_clawops_agent(from_number, scenario)
-        if _pipeline_configured()
-        else _make_realtime_agent(from_number, scenario)
-    )
+    agent = _make_call_agent(from_number, scenario)
     register_transcript_listener(agent, session_id)
 
     try:

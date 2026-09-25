@@ -75,7 +75,12 @@ async def receive_transcript_webhook(request: Request) -> Response:
     event = params.get("Event", "")
 
     if event not in _EVENT_REQUIRED_FIELDS:
-        raise HTTPException(status_code=400, detail="Unsupported transcript event")
+        # Acknowledge anything we do not act on -- the console's test ping
+        # ("test"), an event subscribed by mistake, one ClawOps adds later.
+        # Answering 400 marks the delivery failed, and enough failures get the
+        # whole webhook disabled, taking transcript.completed down with it.
+        logger.info("Ignoring ClawOps event this endpoint does not handle: %s", event)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     missing = (_COMMON_REQUIRED_FIELDS | _EVENT_REQUIRED_FIELDS[event]) - params.keys()
     if missing:

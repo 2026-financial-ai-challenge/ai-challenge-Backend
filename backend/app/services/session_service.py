@@ -102,7 +102,13 @@ def update_call_status(
         return _to_response(session)
 
 
-def attach_call(session_id: str, call_id: str) -> SessionResponse | None:
+def attach_call(
+    session_id: str,
+    call_id: str,
+    *,
+    scenario_id: str | None = None,
+    agent_variant: str | None = None,
+) -> SessionResponse | None:
     with SessionLocal.begin() as db:
         session = db.scalar(_session_query(session_id))
         if session is None:
@@ -110,10 +116,22 @@ def attach_call(session_id: str, call_id: str) -> SessionResponse | None:
 
         call = db.scalar(select(Call).where(Call.clawops_call_id == call_id))
         if call is None:
-            db.add(Call(session_id=session_id, clawops_call_id=call_id, status="calling"))
+            db.add(
+                Call(
+                    session_id=session_id,
+                    clawops_call_id=call_id,
+                    status="calling",
+                    scenario_id=scenario_id,
+                    agent_variant=agent_variant,
+                )
+            )
         else:
             call.session_id = session_id
             call.status = "calling"
+            if scenario_id is not None:
+                call.scenario_id = scenario_id
+            if agent_variant is not None:
+                call.agent_variant = agent_variant
         session.call_status = "calling"
         if session.report_status is None:
             session.report_status = "pending"

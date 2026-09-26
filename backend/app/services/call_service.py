@@ -3,7 +3,6 @@ import inspect
 import logging
 import os
 from datetime import datetime, timezone
-from secrets import choice
 from threading import Lock, Thread
 
 from sqlalchemy import select
@@ -27,7 +26,7 @@ from app.services.session_service import (
     update_call_status,
     update_report_status,
 )
-from app.training.scenarios import get_runtime_scenario
+from app.training.scenarios import ensure_ai_importable, get_runtime_scenario
 
 
 logger = logging.getLogger(__name__)
@@ -533,37 +532,6 @@ _STATUS_CALLBACK_EVENTS = (
 _MISSED_STATUSES = {"no-answer", "busy", "rejected", "canceled"}
 _RINGING_STATUSES = {"queued", "ringing", "in-progress"}
 
-_last_agent_id: str | None = None
-
-
-def _managed_agent_ids() -> list[str]:
-    """Console agent ids for managed mode. Empty until they are configured.
-
-    Empty is not an error here: _create_outbound_call falls back to the
-    in-process agent so calls keep going out while the ids are still being
-    collected from the console.
-    """
-    raw = os.getenv("CLAWOPS_AGENT_IDS", "").strip()
-    return [part.strip() for part in raw.split(",") if part.strip()]
-
-
-def _pick_agent_id() -> str:
-    """One console agent per call, avoiding an immediate repeat.
-
-    Mirrors ai/scenarios.pick_scenario: a trainee who takes the announced call
-    and then the unannounced one should not be handed the same scam twice.
-    Each console agent carries its own prompt and knowledge, so rotating the
-    id is what rotates the scenario now.
-    """
-    global _last_agent_id
-
-    ids = _managed_agent_ids()
-    pool = [agent_id for agent_id in ids if agent_id != _last_agent_id] or ids
-    picked = choice(pool)
-    _last_agent_id = picked
-    return picked
-
-
 def _status_callback_url() -> str:
     base = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
     if not base:
@@ -576,20 +544,27 @@ def _status_callback_url() -> str:
     return f"{base}/v1/webhooks/clawops/status"
 
 
-async def _start_managed_call(phone_number: str, from_number: str):
-    """Hand the whole call to a ClawOps console agent.
+async def _start_managed_call(phone_number: str, from_number: str, scenario):
+    """Hand the call to the ClawOps agent that ai/managed_agent.py provisions.
 
-    No session, no media websocket, no local prompt: ClawOps runs the
-    conversation and we learn how it went from the status and transcript
-    webhooks.
+    The agents are created by `python -m ai.managed_agent sync` and named
+    spc-<scenario id>-<variant>, so they are resolved by name rather than by
+    a pasted id. They carry only the shared rules; this call's scenario rides
+    along in the CallContext, which is why editing ai/scenarios/library.py
+    takes effect without re-syncing.
     """
     from app.services.report_service import _clawops_calls
 
-    agent_id = _pick_agent_id()
+    ensure_ai_importable()
+    from ai.managed_agent import build_call_context, pick_variant, resolve_agent_id
+
+    variant = pick_variant()
+    agent_id = await asyncio.to_thread(resolve_agent_id, scenario.id, variant)
     kwargs = {
         "to": phone_number,
         "from_": from_number,
         "agent_id": agent_id,
+        "call_context": build_call_context(scenario),
         "timeout": 30,
     }
     callback = _status_callback_url()
@@ -598,8 +573,14 @@ async def _start_managed_call(phone_number: str, from_number: str):
         kwargs["status_callback_event"] = _STATUS_CALLBACK_EVENTS
 
     calls = _clawops_calls()
-    logger.info("Call agent: ClawOps managed console agent=%s", agent_id)
-    return await asyncio.to_thread(lambda: calls.create(**kwargs))
+    logger.info(
+        "Call agent: ClawOps managed scenario=%s variant=%s agent=%s",
+        scenario.id,
+        variant,
+        agent_id,
+    )
+    call = await asyncio.to_thread(lambda: calls.create(**kwargs))
+    return call, variant
 
 
 async def handle_call_status_event(call_id: str) -> None:
@@ -745,28 +726,11 @@ async def _create_outbound_call(session_id: str):
     _require_env("CLAWOPS_ACCOUNT_ID")
     from_number = _outbound_phone_number(session.currentTrainingType)
 
-    if _call_agent_mode() == "managed" and not _managed_agent_ids():
-        logger.warning(
-            "CALL_AGENT_MODE=managed but CLAWOPS_AGENT_IDS is empty, so there "
-            "is no console agent to hand the call to; using the in-process "
-            "agent for this call"
-        )
-    elif _call_agent_mode() == "managed":
-        # Nothing below this point applies: the console agent owns the prompt,
-        # so no scenario is picked and no LLM key of ours is involved. There is
-        # also no agent object to monitor or disconnect -- the status and
-        # transcript webhooks carry the call from here.
-        call = await _start_managed_call(phone_number, from_number)
-        bind_call(session_id, call.call_id)
-        attach_call(session_id, call.call_id)
-        logger.info(
-            "Started managed call session=%s call_id=%s",
-            session_id,
-            call.call_id,
-        )
-        return None, call, None
-
-    _require_call_llm_key()
+    managed = _call_agent_mode() == "managed"
+    if not managed:
+        # Managed calls run the model on ClawOps' side, so our own LLM key is
+        # only needed by the in-process paths.
+        _require_call_llm_key()
 
     try:
         # Instant: a fixed playbook is picked in process.
@@ -779,6 +743,33 @@ async def _create_outbound_call(session_id: str):
             scenario = get_call_scenario()
         except Exception as fallback_exc:
             raise CallConfigurationError(str(fallback_exc)) from fallback_exc
+
+    if managed:
+        # ClawOps runs the conversation, so there is no agent object to monitor
+        # or disconnect -- the status and transcript webhooks carry the call
+        # from here. A missing agent (never synced) is not fatal: fall through
+        # to the in-process path so the call still goes out.
+        try:
+            call, variant = await _start_managed_call(
+                phone_number, from_number, scenario
+            )
+        except LookupError as exc:
+            logger.warning("%s; using the in-process agent for this call", exc)
+            _require_call_llm_key()  # skipped above; the fallback path needs it
+        else:
+            bind_call(session_id, call.call_id)
+            attach_call(
+                session_id,
+                call.call_id,
+                scenario_id=scenario.id,
+                agent_variant=variant,
+            )
+            logger.info(
+                "Started managed call session=%s call_id=%s",
+                session_id,
+                call.call_id,
+            )
+            return None, call, scenario
 
     logger.info(
         "Starting pipeline call session=%s scenario=%s",
@@ -807,7 +798,15 @@ async def _create_outbound_call(session_id: str):
         raise
 
     bind_call(session_id, call_session.call_id)
-    attach_call(session_id, call_session.call_id)
+    attach_call(
+        session_id,
+        call_session.call_id,
+        scenario_id=scenario.id,
+        # Not one of ai/managed_agent.py's VARIANTS: this call was spoken by
+        # the in-process Agent SDK, so the comparison should not count it as
+        # either managed variant.
+        agent_variant="sdk",
+    )
     return agent, call_session, scenario
 
 

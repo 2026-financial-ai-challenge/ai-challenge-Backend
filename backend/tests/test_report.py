@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.main import app
 from app.database import SessionLocal
+from app.models.call import Call
 from app.models.participant import Participant
 from app.models.scheduled_training import ScheduledTraining
 from app.models.training_session import TrainingSession
@@ -28,7 +29,8 @@ from app.services.report_service import (
     score_conversation,
     _scenario_report_note,
 )
-from app.services.session_service import create_session, reset_sessions
+from app.services.session_service import attach_call, create_session, reset_sessions
+from app.training.scenarios import ensure_ai_importable, get_call_scenario
 from app.services.training_scheduler import (
     process_due_scheduled_trainings,
     schedule_unannounced_training,
@@ -380,6 +382,52 @@ def test_draft_then_final_report(monkeypatch):
     assert stored.draft is not None
     assert stored.final is not None
     assert stored.clawopsSummary == {"topic": "account alert"}
+
+
+def test_final_report_is_scored_against_the_scenario_the_call_ran(monkeypatch):
+    """The scenario stored on the call reaches score_conversation.
+
+    Without this the report was always scored against get_call_scenario()'s
+    default, so a trainee who took the delivery scam got coaching written for
+    a different one.
+    """
+    ensure_ai_importable()
+    from ai.scenarios import SCENARIOS
+
+    ran = next(sid for sid in SCENARIOS if sid != get_call_scenario().id)
+
+    session_id = _session_id()
+    bind_call(session_id, "CAscenario")
+    attach_call(session_id, "CAscenario", scenario_id=ran, agent_variant="live")
+
+    with SessionLocal() as db:
+        stored_call = db.scalar(
+            select(Call).where(Call.clawops_call_id == "CAscenario")
+        )
+        assert stored_call.scenario_id == ran
+        assert stored_call.agent_variant == "live"
+
+    monkeypatch.setattr(
+        report_service,
+        "fetch_clawops_transcript",
+        lambda call_id: SimpleNamespace(
+            status="completed",
+            segments=[SimpleNamespace(speaker="CUSTOMER", text="안 믿어요. 끊을게요.")],
+        ),
+    )
+    monkeypatch.setattr(report_service, "fetch_clawops_summary", lambda call_id: None)
+
+    seen = {}
+
+    async def fake_score(transcript, **kwargs):
+        seen["scenario_id"] = getattr(kwargs.get("scenario"), "id", None)
+        return heuristic_report(transcript, source="clawops")
+
+    monkeypatch.setattr(report_service, "score_conversation", fake_score)
+
+    asyncio.run(build_final_report(session_id, "CAscenario"))
+
+    assert seen["scenario_id"] == ran
 
 
 def test_unannounced_report_becomes_source_session_final(monkeypatch):

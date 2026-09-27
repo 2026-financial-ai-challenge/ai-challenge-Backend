@@ -94,6 +94,25 @@ def session_id_for_call(call_id: str) -> str | None:
         return db.scalar(select(Call.session_id).where(Call.clawops_call_id == call_id))
 
 
+def _scenario_for_call(call_id: str):
+    """The scenario this call actually ran, for scoring and coaching.
+
+    Calls placed before scenario_id was recorded have none; get_call_scenario()
+    then picks the default, which is what the whole report used to be scored
+    against no matter which scam the trainee actually heard.
+    """
+    with SessionLocal() as db:
+        scenario_id = db.scalar(
+            select(Call.scenario_id).where(Call.clawops_call_id == call_id)
+        )
+    ensure_ai_importable()
+    if not scenario_id:
+        return get_call_scenario()
+    from ai.scenarios import get_scenario
+
+    return get_scenario(scenario_id)
+
+
 def bind_call(session_id: str, call_id: str) -> None:
     set_session_call_id(session_id, call_id)
     update_report_status(session_id, "pending")
@@ -428,6 +447,7 @@ async def build_final_report(
         source="clawops",
         clawops_summary=summary,
         client=client,
+        scenario=_scenario_for_call(call_id),
     )
     _replace_clawops_turns(session_id, call_id, segments)
     _save_report(

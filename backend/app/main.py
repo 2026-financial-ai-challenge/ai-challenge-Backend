@@ -61,14 +61,38 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# An origin the browser sends but we do not list gets a 400 "Disallowed CORS
+# origin" before any handler runs, which from the frontend is indistinguishable
+# from the backend being down. The deployed frontend was missing here, so every
+# request from it failed that way.
+_ALLOWED_ORIGINS = (
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "https://safety-phishing-call.vercel.app",
+)
+# Vercel gives every preview deploy its own subdomain, so PR previews would
+# otherwise need a backend redeploy each time to be allowed through.
+_PREVIEW_ORIGIN_PATTERN = r"https://safety-phishing-call-[a-z0-9-]+\.vercel\.app"
+
+
+def _allowed_origins() -> list[str]:
+    """The static list plus anything CORS_ALLOWED_ORIGINS adds.
+
+    A trailing slash is stripped because the browser's Origin header never has
+    one, so "https://example.com/" in the list would silently match nothing.
+    """
+    extra = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    return list(_ALLOWED_ORIGINS) + [
+        origin.strip().rstrip("/") for origin in extra.split(",") if origin.strip()
+    ]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=_allowed_origins(),
+    allow_origin_regex=_PREVIEW_ORIGIN_PATTERN,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

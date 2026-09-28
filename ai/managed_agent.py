@@ -30,6 +30,7 @@ What the AI owner runs (no backend needed):
 
     python -m ai.managed_agent sync                 # create/update the 10 agents
     python -m ai.managed_agent sync --dry-run       # show the payloads only
+    python -m ai.managed_agent list --variant external_tts   # ids, unsafe agents, missing names
     python -m ai.managed_agent context --scenario investigation_unit
     python -m ai.managed_agent call --to 010XXXXXXXX --scenario bank_security_hold \\
         --variant live --wait                       # PoC test call
@@ -340,6 +341,24 @@ def sync_agents(*, rest: ClawOpsREST | None, variants=VARIANTS, scenario_ids=Non
     return result
 
 
+_SAFETY_MARK = "[교육용 시뮬레이션 안전 규칙"
+
+
+def agent_listing(agents: list[dict], variants=VARIANTS) -> list[str]:
+    """One line per agent, flagging ones without the safety rules, then the
+    spc- names sync would create that do not exist yet."""
+    lines = []
+    for a in agents:
+        name = a.get("name") or ""
+        mode = (a.get("configuration") or {}).get("outputMode", "?")
+        flag = "" if _SAFETY_MARK in (a.get("instructions") or "") else "  [안전 규칙 없음]"
+        lines.append(f"{a.get('agentId')}  {name}  [{mode}]{flag}")
+    present = {a.get("name") for a in agents}
+    missing = [agent_name(pb.id, v) for pb in PLAYBOOKS for v in variants if agent_name(pb.id, v) not in present]
+    lines += [f"(없음) {name}  -> sync 필요" for name in missing]
+    return lines
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 _FINAL = {"completed", "failed", "busy", "no-answer", "canceled", "rejected"}
@@ -355,6 +374,9 @@ def _main(argv: list[str] | None = None) -> int:
     p_sync.add_argument("--variant", action="append", choices=VARIANTS)
     p_sync.add_argument("--scenario", action="append", choices=sorted(SCENARIOS))
     p_sync.add_argument("--dry-run", action="store_true")
+
+    p_list = sub.add_parser("list", help="show every agent in the account with its id")
+    p_list.add_argument("--variant", action="append", choices=VARIANTS)
 
     p_ctx = sub.add_parser("context", help="print the CallContext for a scenario")
     p_ctx.add_argument("--scenario", required=True)
@@ -381,6 +403,10 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     rest = ClawOpsREST()
+    if args.cmd == "list":
+        print("\n".join(agent_listing(rest.list_agents(), tuple(args.variant or VARIANTS))))
+        return 0
+
     if not args.from_:
         parser.error("--from or CLAWOPS_PHONE_NUMBER is required")
     scenario = get_scenario(args.scenario)

@@ -141,3 +141,17 @@ def test_create_call_sends_the_pascal_case_body():
     assert body["AgentId"] == "ag" and body["To"] == "01000000000" and body["From"] == "07000000000"
     assert body["CallContext"]["Instruction"] == ctx["instruction"]
     assert json.dumps(body["CallContext"]["Variables"])
+
+
+def test_agent_listing_flags_unsafe_and_missing_agents():
+    synced = ma.agent_payload(PLAYBOOKS[0], "external_tts")
+    agents = [
+        {**synced, "agentId": "ag_1"},
+        {"agentId": "ag_2", "name": "가상의 보이스피싱범 2", "instructions": "",
+         "configuration": {"outputMode": "external_tts"}},
+    ]
+    lines = ma.agent_listing(agents, ("external_tts",))
+    assert lines[0].startswith("ag_1  spc-") and "안전 규칙 없음" not in lines[0]
+    assert "[안전 규칙 없음]" in lines[1]
+    missing = [line for line in lines if line.startswith("(없음)")]
+    assert len(missing) == len(PLAYBOOKS) - 1

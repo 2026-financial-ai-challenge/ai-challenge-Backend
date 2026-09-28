@@ -901,7 +901,10 @@ def _run_training_call(session_id: str) -> None:
 
 async def _start_and_monitor_call(session_id: str) -> None:
     agent, call_session, scenario = await _create_outbound_call(session_id)
-    await _monitor_call(session_id, agent, call_session, scenario)
+    # Managed calls return no agent: ClawOps runs the conversation and the
+    # status webhook (handle_call_status_event) carries the call from here.
+    if agent is not None:
+        await _monitor_call(session_id, agent, call_session, scenario)
 
 
 def _complete_call(clawops_call_id: str) -> None:

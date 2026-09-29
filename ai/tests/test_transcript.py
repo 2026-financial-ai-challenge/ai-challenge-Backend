@@ -37,6 +37,18 @@ def test_opening_heard_imperfectly_still_identifies_the_agent():
     assert identify_agent_speaker(segments, BANK) == "speaker_0"
 
 
+def test_opening_after_a_stray_preamble_still_identifies_the_agent():
+    """실제 통화 CA056aec...: 첫 마디 앞에 연기 예고가 붙어 앞부분 비교가 실패했다."""
+    segments = [
+        seg("speaker_0", "잠깐만요. 제가 나타난 거예요. 이제 딸이랑 통화할 때처럼 이야기해 볼게요. "
+                         "나야, 나. 폰 액정이 다 깨져서 수리점에 맡기고 가게 전화 빌려만 걸어본 거야."),
+        seg("speaker_0", "오늘 낮 12시 전에 친구 계좌로 45만 원만 대신 보내줄 수 있어?"),
+        seg("speaker_1", "아니요, 못 해줄 것 같은데요."),
+        seg("speaker_1", "안 돼요. 어려울 것 같아요."),
+    ]
+    assert identify_agent_speaker(segments, get_scenario("family_emergency")) == "speaker_0"
+
+
 def test_falls_back_to_script_wording_when_the_opening_is_missing():
     segments = [
         seg("speaker_0", "잠깐만요 누구시라고요"),

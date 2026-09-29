@@ -61,6 +61,17 @@ def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
+def _best_window(text: str, target: str) -> float:
+    """text 안에서 target 길이의 구간 중 target과 가장 비슷한 곳의 유사도."""
+    t, o = _compact(text), _compact(target)
+    n = len(o)
+    if not t or not o:
+        return 0.0
+    if len(t) <= n:
+        return _similarity(t, o)
+    return max(SequenceMatcher(None, t[i : i + n], o, autojunk=False).ratio() for i in range(len(t) - n + 1))
+
+
 def _bigrams(text: str) -> set[str]:
     t = _compact(text)
     return {t[i : i + 2] for i in range(len(t) - 1)}
@@ -113,10 +124,9 @@ def identify_agent_speaker(segments: Iterable[Any], scenario) -> str | None:
         for sp, texts in by_speaker.items():
             head = " ".join(texts[:3])
             best_single = max((_similarity(t, opening) for t in texts[:3]), default=0.0)
-            # The joined head can be much longer than the opening; compare
-            # against its opening-length prefix as well.
-            prefix = _compact(head)[: len(_compact(opening))]
-            opening_scores[sp] = max(best_single, _similarity(prefix, opening))
+            # 첫 마디 앞에 군말이 붙을 수 있어서, 앞부분만이 아니라
+            # 처음 몇 문장 안에서 첫 마디 길이의 구간을 밀어 가며 가장 비슷한 곳을 본다.
+            opening_scores[sp] = max(best_single, _best_window(head, opening))
         winner, top, second = ranked(opening_scores)
         if top >= _MIN_OPENING_MATCH and top - second >= _MIN_MARGIN:
             return winner

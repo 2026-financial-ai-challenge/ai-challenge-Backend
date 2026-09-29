@@ -55,7 +55,6 @@ def _authenticated_session() -> tuple[str, dict[str, str]]:
         participant = Participant(
             phone_number="01099998888",
             password_hash=hash_password("testPassword1"),
-            phone_verified_at=datetime.now(timezone.utc),
         )
         db.add(participant)
         db.flush()

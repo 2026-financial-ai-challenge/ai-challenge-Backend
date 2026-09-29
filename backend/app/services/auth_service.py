@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.errors import ApiError
 from app.models.participant import Participant
 from app.models.phone_verification import PhoneVerification
+from app.phone_verification_store import mark_phone_verified
 from app.schemas.auth import AuthParticipant, AuthResponse, RequestSignupOtpResponse, VerifySignupOtpResponse
 from app.services.session_service import mask_phone_number
 from app.services.sms_service import expose_dev_code, send_verification_code
@@ -120,12 +121,11 @@ def signup(
         participant = Participant(phone_number=challenge.phone_number)
         db.add(participant)
     participant.password_hash = hash_password(password)
-    participant.phone_verified_at = now
     record_training_consent(participant, now=now)
-    participant.updated_at = now
     challenge.used_at = now
     db.commit()
     db.refresh(participant)
+    mark_phone_verified(participant.id, now)
     return _auth_response(participant)
 
 
@@ -180,7 +180,6 @@ def record_training_consent(participant: Participant, *, now: datetime | None = 
     participant.surprise_call_agreed = True
     if participant.consented_at is None:
         participant.consented_at = now
-    participant.updated_at = now
 
 
 def _auth_response(participant: Participant) -> AuthResponse:

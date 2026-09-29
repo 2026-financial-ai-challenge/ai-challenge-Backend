@@ -532,6 +532,7 @@ _STATUS_CALLBACK_EVENTS = (
 _MISSED_STATUSES = {"no-answer", "busy", "rejected", "canceled"}
 _RINGING_STATUSES = {"queued", "ringing", "in-progress"}
 
+
 def _status_callback_url() -> str:
     base = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
     if not base:
@@ -901,6 +902,13 @@ def _run_training_call(session_id: str) -> None:
 
 async def _start_and_monitor_call(session_id: str) -> None:
     agent, call_session, scenario = await _create_outbound_call(session_id)
+    if agent is None:
+        # Managed mode: ClawOps runs the conversation, so there is no session
+        # to wait on and no agent to disconnect -- the status and transcript
+        # webhooks carry the call from here. _monitor_call would be handed the
+        # API's Call model instead of a CallSession, and its wait() call would
+        # raise into the catch-all that marks a live call failed.
+        return
     await _monitor_call(session_id, agent, call_session, scenario)
 
 

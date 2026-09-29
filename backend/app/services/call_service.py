@@ -902,14 +902,10 @@ def _run_training_call(session_id: str) -> None:
 
 async def _start_and_monitor_call(session_id: str) -> None:
     agent, call_session, scenario = await _create_outbound_call(session_id)
-    if agent is None:
-        # Managed mode: ClawOps runs the conversation, so there is no session
-        # to wait on and no agent to disconnect -- the status and transcript
-        # webhooks carry the call from here. _monitor_call would be handed the
-        # API's Call model instead of a CallSession, and its wait() call would
-        # raise into the catch-all that marks a live call failed.
-        return
-    await _monitor_call(session_id, agent, call_session, scenario)
+    # Managed calls return no agent: ClawOps runs the conversation and the
+    # status webhook (handle_call_status_event) carries the call from here.
+    if agent is not None:
+        await _monitor_call(session_id, agent, call_session, scenario)
 
 
 def _complete_call(clawops_call_id: str) -> None:

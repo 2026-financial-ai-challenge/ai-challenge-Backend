@@ -16,6 +16,18 @@ def test_base_instructions_carry_safety_style_and_phone_rules():
     # the emergency exit is the only place the exercise may be named, and it
     # has to say it outranks the no-disclosure rule
     assert "모든 규칙보다 우선한다" in text
+    # 동의하지 않은 사람이 받으면 연기를 멈추고, 번호를 달라고 해도 지어내지 않는다
+    assert "잘못 걸었습니다" in text
+    assert "절대 지어내지 않는다" in text
+
+
+def test_call_context_drops_progression_before_reply_examples(monkeypatch):
+    scenario = get_scenario("bank_security_hold")
+    full = ma.build_call_context(scenario)["instruction"]
+    assert "[단계별 대사 예시" in full and "[상대 반응별 받아치기 예시]" in full
+    monkeypatch.setattr(ma, "CALL_CONTEXT_LIMIT", len(full) - 1)
+    trimmed = ma.build_call_context(scenario)["instruction"]
+    assert "[단계별 대사 예시" not in trimmed and "[상대 반응별 받아치기 예시]" in trimmed
 
 
 @pytest.mark.parametrize("scenario_id", sorted(SCENARIOS))
@@ -141,3 +153,17 @@ def test_create_call_sends_the_pascal_case_body():
     assert body["AgentId"] == "ag" and body["To"] == "01000000000" and body["From"] == "07000000000"
     assert body["CallContext"]["Instruction"] == ctx["instruction"]
     assert json.dumps(body["CallContext"]["Variables"])
+
+
+def test_agent_listing_flags_unsafe_and_missing_agents():
+    synced = ma.agent_payload(PLAYBOOKS[0], "external_tts")
+    agents = [
+        {**synced, "agentId": "ag_1"},
+        {"agentId": "ag_2", "name": "가상의 보이스피싱범 2", "instructions": "",
+         "configuration": {"outputMode": "external_tts"}},
+    ]
+    lines = ma.agent_listing(agents, ("external_tts",))
+    assert lines[0].startswith("ag_1  spc-") and "안전 규칙 없음" not in lines[0]
+    assert "[안전 규칙 없음]" in lines[1]
+    missing = [line for line in lines if line.startswith("(없음)")]
+    assert len(missing) == len(PLAYBOOKS) - 1

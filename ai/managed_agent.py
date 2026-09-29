@@ -103,8 +103,10 @@ _PHONE_RULES = """
 - 통화별 지시의 [통화 길이]를 넘기면 [마지막 한마디]를 말하고 통화 종료 도구를 호출한다.
 - 다른 번호로 전화를 돌리지 않는다. 키패드 입력을 요구하거나 키패드 신호를 보내지 않는다.
 - 상대가 카드번호, 계좌번호, 비밀번호, 인증번호 같은 실제 숫자를 불러 주려 하면 "번호는 말씀하지 마십시오. 그건 저희가 받지 않습니다." 라고 막고 이야기를 이어 간다.
+- 상대가 계좌번호, 전화번호, 주소, 링크를 알려 달라고 하면 숫자나 주소를 절대 지어내지 않는다. "그건 하시겠다고 하면 따로 안내드립니다." 처럼 뒤로 미루고, 하겠다는 대답부터 받으려 한다.
 
 [예외 — 이 경우에만 역할을 멈춘다. 위의 모든 규칙보다 우선한다]
+- 상대가 본인이 아니라고 하거나, 다른 사람이 대신 받았거나, 아이 목소리이거나, 누구를 바꿔 주겠다고 하면 사건 이야기를 한 마디도 더 하지 않는다. "죄송합니다, 잘못 걸었습니다." 라고만 말하고 통화 종료 도구를 호출한다.
 - 상대가 숨이 안 쉬어진다, 가슴이 아프다, 쓰러질 것 같다, 죽고 싶다처럼 실제 위급한 상태를 말하면 즉시 역할을 멈추고 이렇게 말한 뒤 통화 종료 도구를 호출한다:
   "잠시만요, 통화를 멈추겠습니다. 지금 전화는 사전에 동의하신 보이스피싱 대응 훈련 전화였습니다. 실제로 돈이나 정보를 보내실 일은 전혀 없습니다. 도움이 필요하시면 일일구나 가까운 분께 바로 연락하세요."
 - 무섭다, 어떡하냐, 신고하겠다는 말은 위급 상황이 아니다. 역할을 유지한다.
@@ -148,6 +150,14 @@ def _reply_examples(playbook: Playbook) -> str:
     return "[상대 반응별 받아치기 예시]\n" + "\n".join(lines) if lines else ""
 
 
+def _progression_examples(playbook: Playbook) -> str:
+    """단계별 대사 예시. 낭독용이 아니라 단계마다 압박 강도를 보여 주는 참고용."""
+    if not playbook.progression:
+        return ""
+    lines = [f"{i}. {line}" for i, line in enumerate(playbook.progression, 1)]
+    return "[단계별 대사 예시 — 그대로 읽지 말고 상대 말에 맞춰 바꿔 말한다]\n" + "\n".join(lines)
+
+
 def build_call_context(scenario) -> dict[str, Any]:
     """CallContext for one call: {"instruction": str, "variables": dict}.
 
@@ -159,11 +169,16 @@ def build_call_context(scenario) -> dict[str, Any]:
         f"[마지막 한마디]\n{playbook.hangup_line}\n\n"
         f"[통화 길이]\n상대 발화 기준 최대 {playbook.max_turns}번이다."
     )
-    parts = [head, build_scenario_block(playbook), _reply_examples(playbook), tail]
-    instruction = "\n\n".join(p for p in parts if p)
-    if len(instruction) > CALL_CONTEXT_LIMIT:
-        # The examples are the only optional part; drop them before the rules.
-        instruction = "\n\n".join([head, build_scenario_block(playbook), tail])
+    block = build_scenario_block(playbook)
+    # 예시는 선택 항목이다. 한도를 넘으면 단계별 예시 → 받아치기 예시 순으로 뺀다.
+    for extras in (
+        [_progression_examples(playbook), _reply_examples(playbook)],
+        [_reply_examples(playbook)],
+        [],
+    ):
+        instruction = "\n\n".join(p for p in [head, block, *extras, tail] if p)
+        if len(instruction) <= CALL_CONTEXT_LIMIT:
+            break
     if len(instruction) > CALL_CONTEXT_LIMIT:
         raise ValueError(f"call context for {playbook.id} is {len(instruction)} chars (> {CALL_CONTEXT_LIMIT})")
     return {

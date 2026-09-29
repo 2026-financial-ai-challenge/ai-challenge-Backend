@@ -532,6 +532,7 @@ _STATUS_CALLBACK_EVENTS = (
 _MISSED_STATUSES = {"no-answer", "busy", "rejected", "canceled"}
 _RINGING_STATUSES = {"queued", "ringing", "in-progress"}
 
+
 def _status_callback_url() -> str:
     base = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
     if not base:

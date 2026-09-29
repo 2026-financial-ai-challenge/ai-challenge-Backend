@@ -16,6 +16,18 @@ def test_base_instructions_carry_safety_style_and_phone_rules():
     # the emergency exit is the only place the exercise may be named, and it
     # has to say it outranks the no-disclosure rule
     assert "모든 규칙보다 우선한다" in text
+    # 동의하지 않은 사람이 받으면 연기를 멈추고, 번호를 달라고 해도 지어내지 않는다
+    assert "잘못 걸었습니다" in text
+    assert "절대 지어내지 않는다" in text
+
+
+def test_call_context_drops_progression_before_reply_examples(monkeypatch):
+    scenario = get_scenario("bank_security_hold")
+    full = ma.build_call_context(scenario)["instruction"]
+    assert "[단계별 대사 예시" in full and "[상대 반응별 받아치기 예시]" in full
+    monkeypatch.setattr(ma, "CALL_CONTEXT_LIMIT", len(full) - 1)
+    trimmed = ma.build_call_context(scenario)["instruction"]
+    assert "[단계별 대사 예시" not in trimmed and "[상대 반응별 받아치기 예시]" in trimmed
 
 
 @pytest.mark.parametrize("scenario_id", sorted(SCENARIOS))

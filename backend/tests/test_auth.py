@@ -1,11 +1,11 @@
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.main import app
-from app.models.phone_verification import PhoneVerification
 from app.models.participant import Participant
+from app.phone_verification_store import read_challenge
 from app.services import auth_service
 from app.services.session_service import reset_sessions
 
@@ -129,9 +129,7 @@ def test_sms_failure_does_not_persist_challenge(client, monkeypatch):
     response = http.post("/v1/auth/signup/otp", json={"phoneNumber": PHONE})
     assert response.status_code == 502
     assert response.json()["code"] == "SMS_SEND_FAILED"
-    with SessionLocal() as db:
-        count = db.scalar(select(func.count()).select_from(PhoneVerification))
-    assert count == 0
+    assert read_challenge(PHONE) is None
 
 
 def test_session_resources_are_owner_only(client, monkeypatch):
@@ -225,3 +223,55 @@ def test_existing_member_records_consent_on_first_training(client, monkeypatch):
         assert stored is not None
         assert stored.has_training_consent() is True
         assert stored.consented_at is not None
+
+
+def test_resend_is_blocked_until_the_cooldown_lapses(client):
+    """The cooldown is the key's own TTL, not a timestamp we compare against."""
+    http, sent = client
+    first = http.post("/v1/auth/signup/otp", json={"phoneNumber": PHONE})
+    assert first.status_code == 200
+
+    second = http.post("/v1/auth/signup/otp", json={"phoneNumber": PHONE})
+    assert second.status_code == 429
+    assert second.json()["code"] == "OTP_COOLDOWN"
+    # The blocked request must not have sent a second code.
+    assert len(sent) == 1
+
+
+def test_wrong_codes_lock_the_challenge(client):
+    http, sent = client
+    http.post("/v1/auth/signup/otp", json={"phoneNumber": PHONE})
+    real_code = sent[-1][1]
+    wrong = "000000" if real_code != "000000" else "111111"
+
+    for attempt in range(1, auth_service.MAX_FAILS):
+        response = http.post(
+            "/v1/auth/signup/verify", json={"phoneNumber": PHONE, "code": wrong}
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "OTP_INVALID"
+
+    locked = http.post(
+        "/v1/auth/signup/verify", json={"phoneNumber": PHONE, "code": wrong}
+    )
+    assert locked.status_code == 429
+    assert locked.json()["code"] == "OTP_LOCKED"
+
+    # Locked means locked: the real code does not rescue the challenge.
+    with_real_code = http.post(
+        "/v1/auth/signup/verify", json={"phoneNumber": PHONE, "code": real_code}
+    )
+    assert with_real_code.status_code == 429
+    assert with_real_code.json()["code"] == "OTP_LOCKED"
+
+
+def test_a_solved_challenge_cannot_be_verified_twice(client):
+    """Issuing the token retires the challenge, so the code stops working."""
+    http, sent = client
+    _verify(http, sent)
+
+    again = http.post(
+        "/v1/auth/signup/verify", json={"phoneNumber": PHONE, "code": sent[-1][1]}
+    )
+    assert again.status_code == 400
+    assert again.json()["code"] == "OTP_NOT_REQUESTED"

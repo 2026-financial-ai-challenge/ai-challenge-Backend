@@ -18,8 +18,8 @@ def request_otp(body: RequestSignupOtpRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/signup/verify", response_model=VerifySignupOtpResponse)
-def verify_otp(body: VerifySignupOtpRequest, db: Session = Depends(get_db)):
-    return verify_signup_otp(db, body.phoneNumber, body.code)
+def verify_otp(body: VerifySignupOtpRequest):
+    return verify_signup_otp(body.phoneNumber, body.code)
 
 
 @router.post("/signup", response_model=AuthResponse, status_code=201)

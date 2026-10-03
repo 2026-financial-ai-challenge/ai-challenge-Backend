@@ -4,7 +4,7 @@ import hmac
 import json
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from secrets import randbelow, token_urlsafe
 
 from sqlalchemy import select
@@ -12,8 +12,18 @@ from sqlalchemy.orm import Session
 
 from app.errors import ApiError
 from app.models.participant import Participant
-from app.models.phone_verification import PhoneVerification
-from app.phone_verification_store import mark_phone_verified
+from app.phone_verification_store import (
+    claim_send_slot,
+    consume_token,
+    count_failure,
+    discard_challenge,
+    issue_token,
+    mark_phone_verified,
+    read_challenge,
+    release_send_slot,
+    store_challenge,
+    token_was_spent,
+)
 from app.schemas.auth import AuthParticipant, AuthResponse, RequestSignupOtpResponse, VerifySignupOtpResponse
 from app.services.session_service import mask_phone_number
 from app.services.sms_service import expose_dev_code, send_verification_code
@@ -22,6 +32,7 @@ PHONE_PATTERN = re.compile(r"010\d{8}")
 OTP_TTL_SEC = 300
 TOKEN_TTL_SEC = 600
 ACCESS_TOKEN_TTL_SEC = 3600
+OTP_RESEND_SEC = 60
 MAX_FAILS = 5
 
 
@@ -37,58 +48,43 @@ def request_signup_otp(db: Session, phone: str) -> RequestSignupOtpResponse:
     existing = db.scalar(select(Participant).where(Participant.phone_number == phone))
     if existing is not None and existing.password_hash is not None:
         raise ApiError(409, "PHONE_ALREADY_REGISTERED", "이미 가입된 전화번호입니다.")
-    now = _now()
-    latest = db.scalar(
-        select(PhoneVerification)
-        .where(PhoneVerification.phone_number == phone)
-        .order_by(PhoneVerification.created_at.desc())
-    )
-    if latest is not None and (now - latest.created_at).total_seconds() < 60:
-        raise ApiError(429, "OTP_COOLDOWN", "인증번호는 60초 후 다시 요청할 수 있습니다.")
+    if not claim_send_slot(phone, OTP_RESEND_SEC):
+        raise ApiError(429, "OTP_COOLDOWN", f"인증번호는 {OTP_RESEND_SEC}초 후 다시 요청할 수 있습니다.")
     code = f"{randbelow(1_000_000):06d}"
-    db.add(PhoneVerification(
-        phone_number=phone, code_hash=_digest(f"{phone}:{code}"),
-        expires_at=now + timedelta(seconds=OTP_TTL_SEC), created_at=now,
-    ))
+    store_challenge(phone, _digest(f"{phone}:{code}"), OTP_TTL_SEC)
     try:
         send_verification_code(phone, code)
     except Exception:
-        db.rollback()
+        # Undo both: a failed delivery should leave no challenge to guess at,
+        # and should not make the caller sit out a cooldown for a code that
+        # never arrived.
+        discard_challenge(phone)
+        release_send_slot(phone)
         raise ApiError(502, "SMS_SEND_FAILED", "인증번호 발송에 실패했습니다.") from None
-    db.commit()
     return RequestSignupOtpResponse(
         phoneNumberMasked=mask_phone_number(phone), expiresInSec=OTP_TTL_SEC,
-        resendAvailableInSec=60, devCode=code if expose_dev_code() else None,
+        resendAvailableInSec=OTP_RESEND_SEC, devCode=code if expose_dev_code() else None,
     )
 
 
-def verify_signup_otp(db: Session, phone: str, code: str) -> VerifySignupOtpResponse:
+def verify_signup_otp(phone: str, code: str) -> VerifySignupOtpResponse:
+    """No database: the challenge lives only in Redis."""
     phone = normalize_phone(phone)
-    challenge = db.scalar(
-        select(PhoneVerification).where(PhoneVerification.phone_number == phone)
-        .order_by(PhoneVerification.created_at.desc()).with_for_update()
-    )
-    now = _now()
+    challenge = read_challenge(phone)
     if challenge is None:
+        # Lapsed, already solved, or never requested: the key is gone in every
+        # case, so the one answer that is always actionable is to ask again.
         raise ApiError(400, "OTP_NOT_REQUESTED", "인증번호를 먼저 요청해 주세요.")
-    if challenge.verified_at is not None:
-        raise ApiError(400, "OTP_ALREADY_USED", "이미 사용된 인증번호입니다.")
-    if now >= challenge.expires_at:
-        raise ApiError(400, "OTP_EXPIRED", "인증번호가 만료되었습니다.")
-    if challenge.fail_count >= MAX_FAILS:
+    if int(challenge.get("fail_count", 0)) >= MAX_FAILS:
         raise ApiError(429, "OTP_LOCKED", "인증 시도 횟수를 초과했습니다.")
     expected = _digest(f"{phone}:{code.strip()}")
-    if not hmac.compare_digest(challenge.code_hash, expected):
-        challenge.fail_count += 1
-        db.commit()
-        if challenge.fail_count >= MAX_FAILS:
+    if not hmac.compare_digest(challenge["code_hash"], expected):
+        failures = count_failure(phone)
+        if failures >= MAX_FAILS:
             raise ApiError(429, "OTP_LOCKED", "인증 시도 횟수를 초과했습니다.")
-        raise ApiError(400, "OTP_INVALID", f"인증번호가 올바르지 않습니다. ({MAX_FAILS - challenge.fail_count}회 남음)")
+        raise ApiError(400, "OTP_INVALID", f"인증번호가 올바르지 않습니다. ({MAX_FAILS - failures}회 남음)")
     token = token_urlsafe(32)
-    challenge.verified_at = now
-    challenge.verification_token_hash = _digest(token)
-    challenge.token_expires_at = now + timedelta(seconds=TOKEN_TTL_SEC)
-    db.commit()
+    issue_token(phone, _digest(token), TOKEN_TTL_SEC)
     return VerifySignupOtpResponse(verificationToken=token, expiresInSec=TOKEN_TTL_SEC)
 
 
@@ -104,25 +100,20 @@ def signup(
     if not privacy or not unannounced_training:
         raise ApiError(400, "CONSENT_REQUIRED", "필수 동의 항목에 모두 동의해야 합니다.")
     token_hash = _digest(verification_token)
-    challenge = db.scalar(
-        select(PhoneVerification).where(PhoneVerification.verification_token_hash == token_hash).with_for_update()
-    )
-    now = _now()
-    if challenge is None or challenge.verified_at is None:
+    phone = consume_token(token_hash, spent_ttl_sec=TOKEN_TTL_SEC)
+    if phone is None:
+        if token_was_spent(token_hash):
+            raise ApiError(400, "VERIFICATION_TOKEN_USED", "이미 사용된 인증 토큰입니다.")
         raise ApiError(400, "INVALID_VERIFICATION_TOKEN", "유효하지 않은 인증 토큰입니다.")
-    if challenge.used_at is not None:
-        raise ApiError(400, "VERIFICATION_TOKEN_USED", "이미 사용된 인증 토큰입니다.")
-    if challenge.token_expires_at is None or now >= challenge.token_expires_at:
-        raise ApiError(400, "VERIFICATION_TOKEN_EXPIRED", "인증 토큰이 만료되었습니다.")
-    participant = db.scalar(select(Participant).where(Participant.phone_number == challenge.phone_number).with_for_update())
+    now = _now()
+    participant = db.scalar(select(Participant).where(Participant.phone_number == phone).with_for_update())
     if participant is not None and participant.password_hash is not None:
         raise ApiError(409, "PHONE_ALREADY_REGISTERED", "이미 가입된 전화번호입니다.")
     if participant is None:
-        participant = Participant(phone_number=challenge.phone_number)
+        participant = Participant(phone_number=phone)
         db.add(participant)
     participant.password_hash = hash_password(password)
     record_training_consent(participant, now=now)
-    challenge.used_at = now
     db.commit()
     db.refresh(participant)
     mark_phone_verified(participant.id, now)

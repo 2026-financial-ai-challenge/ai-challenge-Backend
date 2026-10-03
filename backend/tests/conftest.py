@@ -97,3 +97,22 @@ def _engine_is_bound_to_the_test_database() -> None:
             + f". Expected {_TEST_URL.host}/{_TEST_URL.database}.",
             returncode=2,
         )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _signup_store_uses_a_fake_redis() -> None:
+    """Point the signup verification store at an in-process Redis.
+
+    The suite already builds a real Postgres database for itself, but a real
+    Redis would be one more service to have running before tests pass -- and
+    in CI, one more to declare. fakeredis implements the commands this store
+    uses (hashes with a TTL, SET NX, GETDEL), so the store is exercised as
+    written rather than mocked out.
+    """
+    import fakeredis
+
+    from app import phone_verification_store as store
+
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    store._client.cache_clear()
+    store._client = lambda: fake

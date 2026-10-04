@@ -12,8 +12,8 @@ from ai.scenarios import _ALIASES, DEFAULT_SCENARIO_ID, SCENARIOS, get_scenario
 PINNED_IDS = {
     "bank_security_hold",
     "low_interest_loan",
-    "delivery_payment_error",
-    "family_emergency",
+    "ipo_allocation",
+    "card_delivery",
     "investigation_unit",
 }
 
@@ -29,7 +29,11 @@ def test_each_id_resolves_to_its_own_playbook():
 
 
 def test_aliases_are_pinned():
-    assert _ALIASES == {"voice_phishing_training": "bank_security_hold"}
+    assert _ALIASES == {
+        "voice_phishing_training": "bank_security_hold",
+        "delivery_payment_error": "ipo_allocation",
+        "family_emergency": "card_delivery",
+    }
     assert get_scenario("voice_phishing_training").system_prompt == (
         SCENARIOS["bank_security_hold"].system_prompt
     )
@@ -37,6 +41,6 @@ def test_aliases_are_pinned():
 
 def test_agent_name_format_is_pinned():
     # resolve_agent_id looks agents up by this name; a new format orphans every synced agent
-    assert ma.agent_name("family_emergency", "external_tts") == (
-        "spc-family_emergency-external_tts"
+    assert ma.agent_name("card_delivery", "external_tts") == (
+        "spc-card_delivery-external_tts"
     )

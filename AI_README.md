@@ -89,8 +89,8 @@ Scenario.system_prompt = SAFETY_RULES + _STYLE_RULES + 시나리오 블록 + 퓨
 | --- | --- | --- | :---: | :---: |
 | `bank_security_hold` | 해외 결제 승인 가로채기 | 기관사칭형 | 중 | 8 |
 | `low_interest_loan` | 대환대출 선상환 요구 | 대출사기형 | 하 | 7 |
-| `delivery_payment_error` | 공모주 우선 배정 투자 권유 | 투자사기형 | 하 | 8 |
-| `family_emergency` | 카드 배송원 사칭 | 배송원사칭형 | 중 | 8 |
+| `ipo_allocation` | 공모주 우선 배정 투자 권유 | 투자사기형 | 하 | 8 |
+| `card_delivery` | 카드 배송원 사칭 | 배송원사칭형 | 중 | 8 |
 | `investigation_unit` | 명의도용 수사 협조 압박 | 수사기관사칭형 | 상 | 9 |
 
 - `get_scenario(id)` — 모르는 id는 기본 시나리오로 폴백하되 **요청한 id는 유지**합니다.

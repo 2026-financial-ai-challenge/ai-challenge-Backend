@@ -46,7 +46,7 @@ def test_opening_after_a_stray_preamble_still_identifies_the_agent():
         seg("speaker_1", "아니요, 못 해줄 것 같은데요."),
         seg("speaker_1", "안 돼요. 어려울 것 같아요."),
     ]
-    assert identify_agent_speaker(segments, get_scenario("family_emergency")) == "speaker_0"
+    assert identify_agent_speaker(segments, get_scenario("card_delivery")) == "speaker_0"
 
 
 def test_falls_back_to_script_wording_when_the_opening_is_missing():

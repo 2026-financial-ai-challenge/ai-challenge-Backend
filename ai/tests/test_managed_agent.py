@@ -158,7 +158,7 @@ def test_create_call_sends_the_pascal_case_body():
             return Response()
 
     rest = ma.ClawOpsREST(api_key="k", account_id="AC1", client=Http())
-    ctx = ma.build_call_context(get_scenario("family_emergency"))
+    ctx = ma.build_call_context(get_scenario("card_delivery"))
     assert rest.create_call(to="01000000000", from_="07000000000", agent_id="ag", call_context=ctx)["callId"] == "CA1"
     assert sent["url"].endswith("/v1/accounts/AC1/calls")
     assert sent["headers"]["Authorization"] == "Bearer k"

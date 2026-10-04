@@ -79,16 +79,16 @@ _API_BASE = os.getenv("CLAWOPS_API_BASE", "https://api.claw-ops.com").rstrip("/"
 CARTESIA_VOICES: dict[str, str] = {
     "bank_security_hold": "e1717dc3-b87b-4720-aa7f-b6db290e0609",      # Taehyun - Friendly Host
     "low_interest_loan": "69c18e1d-fab0-4747-b9da-58617cd8b9e4",       # Soyeon - Bright Companion
-    "delivery_payment_error": "15628352-2ede-4f1b-89e6-ceda0c983fbc",  # Jiwoo - Service Specialist
-    "family_emergency": "537a82ae-4926-4bfb-9aec-aff0b80a12a5",        # Minho (10-01 콘솔에서 고른 목소리)
+    "ipo_allocation": "15628352-2ede-4f1b-89e6-ceda0c983fbc",  # Jiwoo - Service Specialist
+    "card_delivery": "537a82ae-4926-4bfb-9aec-aff0b80a12a5",           # Minho (10-01 콘솔에서 고른 목소리)
     "investigation_unit": "89f4372f-1f73-4b85-8e1e-5d24ed8bc826",      # Jaewon - Steady Advisor
 }
 # GPT-Live also accepts the Realtime voices; these five have known characters.
 LIVE_VOICES: dict[str, str] = {
     "bank_security_hold": "cedar",
     "low_interest_loan": "coral",
-    "delivery_payment_error": "sage",
-    "family_emergency": "ballad",
+    "ipo_allocation": "sage",
+    "card_delivery": "ballad",
     "investigation_unit": "ash",
 }
 CARTESIA_SPEED: dict[str, float] = {}

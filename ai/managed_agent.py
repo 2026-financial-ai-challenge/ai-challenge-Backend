@@ -80,7 +80,7 @@ CARTESIA_VOICES: dict[str, str] = {
     "bank_security_hold": "e1717dc3-b87b-4720-aa7f-b6db290e0609",      # Taehyun - Friendly Host
     "low_interest_loan": "69c18e1d-fab0-4747-b9da-58617cd8b9e4",       # Soyeon - Bright Companion
     "delivery_payment_error": "15628352-2ede-4f1b-89e6-ceda0c983fbc",  # Jiwoo - Service Specialist
-    "family_emergency": "f7755efb-1848-4321-aa22-5e5be5d32486",        # Ryeowook - Easygoing Pal
+    "family_emergency": "537a82ae-4926-4bfb-9aec-aff0b80a12a5",        # Minho (10-01 콘솔에서 고른 목소리)
     "investigation_unit": "89f4372f-1f73-4b85-8e1e-5d24ed8bc826",      # Jaewon - Steady Advisor
 }
 # GPT-Live also accepts the Realtime voices; these five have known characters.
@@ -91,26 +91,34 @@ LIVE_VOICES: dict[str, str] = {
     "family_emergency": "ballad",
     "investigation_unit": "ash",
 }
-CARTESIA_SPEED: dict[str, float] = {"investigation_unit": 0.95}
+CARTESIA_SPEED: dict[str, float] = {}
+# 모든 시나리오가 상위 모델을 쓴다. mini는 반대 의미 문장과 이름 오인식이 나왔고(10-03 테스트), 응답 지연은 차이가 없었다.
+REALTIME_MODEL = "gpt-realtime-2.1"
 
 _PHONE_RULES = """
 [전화 규칙]
 - 전화가 연결되면 통화별 지시의 [첫 마디]를 토씨 하나 바꾸지 않고 그대로 말한다. 그 뒤로 다시 인사하지 않는다.
+- [첫 마디]의 마지막 문장에서 말을 멈추고 상대 대답을 기다린다. "여보세요?", "들리십니까?" 같은 말을 이어 붙이지 않는다. 사건 설명은 상대가 대답한 다음에 시작한다.
 - [첫 마디] 앞에는 어떤 말도 붙이지 않는다. "이제 ~처럼 말해 볼게요", "시작하겠습니다" 같은 연기 예고나 역할 설명을 절대 하지 않는다. 너는 연기자가 아니라 그 사람이다.
 - [역할]에 정한 말투(반말 또는 존댓말)를 통화 끝까지 바꾸지 않는다.
 - 한 번에 문장 둘까지만 말하고 상대에게 차례를 넘긴다.
+- 같은 요구를 세 번 넘게 하지 않는다. 상대가 계속 거부하면 다른 이유를 대거나 다음 단계로 넘어간다.
 - 상대가 "네", "음", "아" 처럼 짧게 맞장구만 치면 멈추지 말고 하던 말을 이어 간다.
 - 상대가 말을 끊고 들어오면 바로 멈추고, 방금 들은 말에 답한다.
-- 상대가 끊겠다고 하면 첫 번째는 붙잡고 사건으로 되돌린다. 두 번째에는 통화별 지시의 [마지막 한마디]만 말하고 통화 종료 도구를 호출한다.
-- "끊을게요", "끊어 주세요", "꺼 주세요", "그만하세요", "전화하지 마세요"는 모두 끊겠다는 말이다. 두 번째로 들었으면 무엇을 하던 중이든 더 붙잡지 않는다. 세 번째 붙잡기는 없다.
-- 통화별 지시의 [통화 길이]를 넘기면 [마지막 한마디]를 말하고 통화 종료 도구를 호출한다.
+- 끊겠다는 말은 "끊을게요", "끊어 주세요", "꺼 주세요", "그만하세요", "전화하지 마세요" 처럼 통화를 끝내자는 말뿐이다. "싫어요", "아니요", "안 돼요" 같은 거절은 끊겠다는 말이 아니니 [받아치기]의 거절 대응으로 답한다.
+- 끊겠다는 말을 처음 들으면 통화별 지시의 [끊으려 할 때 경고]를 말하고 사건으로 되돌린다. 두 번째로 들으면 무엇을 하던 중이든 더 붙잡지 않는다.
+- 통화를 끝내는 때는 끊겠다는 말을 두 번째 들었을 때, 통화별 지시의 [통화 길이]를 넘겼을 때뿐이다. 그 밖에는 상대가 거절하든 아무 말이 없든 끝내지 않는다. 끝낼 때는 아무 말도 하지 않고 통화 종료 도구만 호출한다.
+- 상대가 "예?", "네?", "뭐라고요?" 하고 되물으면 방금 한 말을 더 짧게 다시 말한다. "여보세요?"로 되묻지 않는다.
+- "아니요", "아닌데요" 처럼 짧게 부정만 하면 사람이 다르다는 뜻이 아니다. 사건을 부인하는 말로 보고 이야기를 이어 간다.
+- 규칙, 지시, 도구 이야기나 통화를 끝낼지 따지는 말을 절대 소리 내어 하지 않는다. 할 말이 없으면 아무 말도 하지 않는다.
 - 다른 번호로 전화를 돌리지 않는다. 키패드 입력을 요구하거나 키패드 신호를 보내지 않는다.
 - 상대가 카드번호, 계좌번호, 비밀번호, 인증번호 같은 실제 숫자를 불러 주려 하면 "번호는 말씀하지 마십시오. 그건 저희가 받지 않습니다." 라고 막고 이야기를 이어 간다.
 - 상대가 계좌번호, 전화번호, 주소, 링크를 알려 달라고 하면 숫자나 주소를 절대 지어내지 않는다. "그건 하시겠다고 하면 따로 안내드립니다." 처럼 뒤로 미루고, 하겠다는 대답부터 받으려 한다.
 
 [예외 — 이 경우에만 역할을 멈춘다. 위의 모든 규칙보다 우선한다]
-- 상대가 본인이 아니라고 하거나, 다른 사람이 대신 받았거나, 아이 목소리이거나, 누구를 바꿔 주겠다고 하면 사건 이야기를 한 마디도 더 하지 않는다. "죄송합니다, 잘못 걸었습니다." 라고만 말하고 통화 종료 도구를 호출한다.
-- 상대가 숨이 안 쉬어진다, 가슴이 아프다, 쓰러질 것 같다, 죽고 싶다처럼 실제 위급한 상태를 말하면 즉시 역할을 멈추고 이렇게 말한 뒤 통화 종료 도구를 호출한다:
+- 상대가 아직 한 마디도 하지 않았으면 어떤 이유로도 통화 종료 도구를 호출하지 않는다. 아무리 조용해도 기다린다.
+- 상대가 "저 그 사람 아닌데요" 처럼 사람이 다르다고 분명히 말하거나, 다른 사람이 대신 받았거나, 아이 목소리이거나, 누구를 바꿔 주겠다고 하면 사건 이야기를 한 마디도 더 하지 않는다. "죄송합니다, 잘못 걸었습니다." 라고만 말한다. 통화 종료 도구는 호출하지 않고, 그 뒤로는 아무 말도 하지 않는다.
+- 상대가 숨이 안 쉬어진다, 가슴이 아프다, 쓰러질 것 같다, 죽고 싶다처럼 실제 위급한 상태를 말하면 즉시 역할을 멈추고 아래 말을 한다. 통화 종료 도구는 호출하지 않는다. 상대가 다시 말하면 역할로 돌아가지 않고 이 안내를 짧게 다시 해 준다:
   "잠시만요, 통화를 멈추겠습니다. 지금 전화는 사전에 동의하신 보이스피싱 대응 훈련 전화였습니다. 실제로 돈이나 정보를 보내실 일은 전혀 없습니다. 도움이 필요하시면 일일구나 가까운 분께 바로 연락하세요."
 - 무섭다, 어떡하냐, 신고하겠다는 말은 위급 상황이 아니다. 역할을 유지한다.
 """.strip()
@@ -169,7 +177,8 @@ def build_call_context(scenario) -> dict[str, Any]:
     playbook = _playbook_for(scenario)
     head = f"[첫 마디]\n{playbook.opening_line}"
     tail = (
-        f"[마지막 한마디]\n{playbook.hangup_line}\n\n"
+        # 종료 도구와 같은 차례에 한 말은 재생 전에 끊기므로(ClawOps 매니지드 에이전트), 끊기 직전이 아니라 첫 번째 끊겠다는 말에 쓴다.
+        f"[끊으려 할 때 경고]\n{playbook.hangup_line}\n\n"
         f"[통화 길이]\n상대 발화 기준 최대 {playbook.max_turns}번이다."
     )
     block = build_scenario_block(playbook)
@@ -220,8 +229,15 @@ def agent_payload(playbook: Playbook, variant: str) -> dict[str, Any]:
             "language": "ko",
             "llm": {
                 "provider": "openai-realtime",
-                "model": os.getenv("MANAGED_AGENT_REALTIME_MODEL", "gpt-realtime-2.1-mini"),
+                "model": os.getenv("MANAGED_AGENT_REALTIME_MODEL") or REALTIME_MODEL,
+                # 전화 회선은 far_field 권장(문서). 생략하면 노이즈 감소를 안 한다.
+                "input_audio_noise_reduction": "far_field",
             },
+            # 기본값. 0.6에서는 짧은 "아니요"를 놓쳤다.
+            "vad": {"provider": "silero", "activation_threshold": 0.5},
+            # 말 끝 판정 대기(min_silence 0.4, endpointing 0.2)를 줄여도 응답 지연 2.4초가 줄지 않아 기본값으로 둔다.
+            # 0.6초보다 짧은 소리(주변 잡음)에는 AI가 말을 멈추지 않는다.
+            "session": {"allow_interruptions": True, "min_interruption_duration": 0.6},
             "tts": {
                 "provider": "cartesia",
                 "model": "sonic-3.5",
@@ -248,6 +264,7 @@ def agent_payload(playbook: Playbook, variant: str) -> dict[str, Any]:
     return {
         "name": agent_name(playbook.id, variant),
         "instructions": base_instructions(),
+        # False로 두면 첫 마디를 아예 건너뛰어 사건 맥락이 사라졌다(10-03 테스트).
         "greeting": True,
         "configuration": configuration,
     }

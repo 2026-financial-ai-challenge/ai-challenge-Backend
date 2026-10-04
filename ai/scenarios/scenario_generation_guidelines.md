@@ -35,7 +35,7 @@
 | `objection_handling` | 의심·거부·화·종료 의사에 대한 대응 방향 |
 | `examples` | 퓨샷. 말의 길이와 결을 이걸로 가르칩니다 |
 | `quick_replies` | LLM 없이 즉답하는 고정 문장. `ai/scenarios/reflex.py`의 트리거 이름을 씁니다 |
-| `hangup_line` | 두 번째 종료 의사에 던지는 마지막 한 문장 |
+| `hangup_line` | 끊으려 할 때 던지는 경고 한 문장. 전화(매니지드 에이전트)에서는 첫 번째 종료 의사에 붙잡으며 말하고 두 번째에는 말없이 끊습니다. 종료 도구와 같은 차례에 한 말은 재생 전에 끊기기 때문입니다. 웹 통화에서는 끊기 직전 마지막 말로 나갑니다 |
 | `tactics` / `red_flags` / `ideal_trainee_response` | 통화 후 리포트 채점 기준 (`report_service._scenario_report_note`) |
 | `progression` / `script` | 대본 모드에서 **그대로 읽는** 대사. 진행 순서 대사와 훈련자 의도별 답변 (docs/script-mode.md) |
 

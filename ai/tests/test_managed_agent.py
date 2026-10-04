@@ -68,10 +68,23 @@ def test_agent_payload_per_playbook(variant):
             assert cfg["tts"]["provider"] == "cartesia"
             assert cfg["tts"]["voice"] == ma.CARTESIA_VOICES[playbook.id]
             assert 0.6 <= cfg["tts"]["speed"] <= 1.5
+            assert cfg["llm"]["input_audio_noise_reduction"] == "far_field"
+            assert 0 <= cfg["vad"]["activation_threshold"] <= 1
+            assert 0 <= cfg["session"]["min_interruption_duration"] <= 2
         else:
             assert cfg["llm"]["provider"] == "openai-live"
             assert cfg["llm"]["voice"] == ma.LIVE_VOICES[playbook.id]
     assert len(names) == len(PLAYBOOKS)
+
+
+def test_realtime_model_per_scenario(monkeypatch):
+    monkeypatch.delenv("MANAGED_AGENT_REALTIME_MODEL", raising=False)
+    for playbook in PLAYBOOKS:
+        model = ma.agent_payload(playbook, "external_tts")["configuration"]["llm"]["model"]
+        assert model == "gpt-realtime-2.1"
+    monkeypatch.setenv("MANAGED_AGENT_REALTIME_MODEL", "gpt-realtime-2.1-mini")
+    model = ma.agent_payload(PLAYBOOKS[-1], "external_tts")["configuration"]["llm"]["model"]
+    assert model == "gpt-realtime-2.1-mini"
 
 
 def test_every_scenario_has_a_voice_in_both_variants():

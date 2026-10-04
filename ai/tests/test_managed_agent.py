@@ -81,7 +81,7 @@ def test_realtime_model_per_scenario(monkeypatch):
     monkeypatch.delenv("MANAGED_AGENT_REALTIME_MODEL", raising=False)
     for playbook in PLAYBOOKS:
         model = ma.agent_payload(playbook, "external_tts")["configuration"]["llm"]["model"]
-        assert model == ("gpt-realtime-2.1" if playbook.id == "investigation_unit" else "gpt-realtime-2.1-mini")
+        assert model == ("gpt-realtime-2.1" if playbook.id in ma.REALTIME_MODEL else "gpt-realtime-2.1-mini")
     monkeypatch.setenv("MANAGED_AGENT_REALTIME_MODEL", "gpt-realtime-2.1-mini")
     model = ma.agent_payload(PLAYBOOKS[-1], "external_tts")["configuration"]["llm"]["model"]
     assert model == "gpt-realtime-2.1-mini"

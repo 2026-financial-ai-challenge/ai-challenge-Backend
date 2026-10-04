@@ -80,7 +80,7 @@ CARTESIA_VOICES: dict[str, str] = {
     "bank_security_hold": "e1717dc3-b87b-4720-aa7f-b6db290e0609",      # Taehyun - Friendly Host
     "low_interest_loan": "69c18e1d-fab0-4747-b9da-58617cd8b9e4",       # Soyeon - Bright Companion
     "delivery_payment_error": "15628352-2ede-4f1b-89e6-ceda0c983fbc",  # Jiwoo - Service Specialist
-    "family_emergency": "f7755efb-1848-4321-aa22-5e5be5d32486",        # Ryeowook - Easygoing Pal
+    "family_emergency": "537a82ae-4926-4bfb-9aec-aff0b80a12a5",        # Minho (10-01 콘솔에서 고른 목소리)
     "investigation_unit": "89f4372f-1f73-4b85-8e1e-5d24ed8bc826",      # Jaewon - Steady Advisor
 }
 # GPT-Live also accepts the Realtime voices; these five have known characters.
@@ -92,8 +92,8 @@ LIVE_VOICES: dict[str, str] = {
     "investigation_unit": "ash",
 }
 CARTESIA_SPEED: dict[str, float] = {}
-# 상위 모델은 investigation_unit만. mini는 반대 의미 문장과 이름 오인식이 나왔다(10-03 테스트).
-REALTIME_MODEL: dict[str, str] = {"investigation_unit": "gpt-realtime-2.1"}
+# 상위 모델: mini는 반대 의미 문장과 이름 오인식이 나왔다(10-03 테스트). family_emergency는 10-01에 콘솔에서 올린 값을 따른다.
+REALTIME_MODEL: dict[str, str] = {"investigation_unit": "gpt-realtime-2.1", "family_emergency": "gpt-realtime-2.1"}
 
 _PHONE_RULES = """
 [전화 규칙]

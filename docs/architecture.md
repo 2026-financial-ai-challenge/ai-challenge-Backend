@@ -18,7 +18,7 @@
 | LLM (응답 생성) | OpenAI / Gemini (상호 폴백) |
 | TTS (텍스트→음성) | ElevenLabs (`eleven_flash_v2_5`) |
 | 번호 확인 | OCTOMO API |
-| 배포 | Railway (백엔드 + Postgres) |
+| 배포 | AWS Lightsail 서울 (백엔드 + Postgres + Redis, Docker Compose) |
 | 프론트엔드 | Next.js / Vercel (별도 저장소) |
 
 ---
@@ -180,11 +180,13 @@ docker compose up --build
 테스트는 `DATABASE_URL`이 가리키는 DB 이름 뒤에 `_test`를 붙인 별도 DB에서 실행됩니다.
 `conftest.py`가 운영 DB를 가리키고 있으면 실행을 거부하도록 안전장치가 걸려 있습니다.
 
-### 배포 (Railway)
+### 배포 (AWS Lightsail 서울)
 
-- `Dockerfile` 기반으로 백엔드 서비스 + Postgres 플러그인 구성
+- ClawOps가 국외 IP의 문자 발송을 거부하므로 **한국 리전**이어야 합니다 (Railway에서 옮긴 이유)
+- 서버 한 대에서 `compose.prod.yaml`로 backend · Postgres · Redis · Caddy를 함께 띄웁니다
+- Caddy가 `DOMAIN`(예: `<IP 하이픈>.sslip.io`)의 HTTPS 인증서를 자동 발급하고 백엔드로 넘깁니다
 - 컨테이너 시작 시 `start.sh`가 `alembic upgrade head`를 최대 10회 재시도한 뒤 uvicorn 기동
-- DB 연결은 `DATABASE_PUBLIC_URL` → `DATABASE_URL` 순으로 조회
+- 절차는 [`backend/README.md`](../backend/README.md#배포)의 배포 섹션 참고
 
 ### 프론트엔드 연동
 
@@ -202,7 +204,7 @@ Next.js 프론트엔드는 Vercel에 배포되며, `next.config.mjs`의 rewrite�
 
 | 변수 | 용도 |
 |---|---|
-| `DATABASE_URL` / `DATABASE_PUBLIC_URL` | DB 연결 (둘 중 하나 필수) |
+| `DATABASE_URL` | DB 연결 (필수, 배포에서는 `compose.prod.yaml`이 채움) |
 | `JWT_SECRET` | 인증 토큰 서명 |
 | `CLAWOPS_API_KEY` / `_ACCOUNT_ID` / `_SMS_FROM` | SMS 발송 |
 | `CLAWOPS_PHONE_NUMBER` / `_UNANNOUNCED_PHONE_NUMBER` | 예고/불시 통화 발신번호 (분리 운영) |
@@ -219,7 +221,6 @@ Next.js 프론트엔드는 Vercel에 배포되며, `next.config.mjs`의 rewrite�
 
 | 이슈 | 상태 |
 |---|---|
-| Railway 배포에서 `DATABASE_URL is not set`으로 마이그레이션 반복 실패 | 변수는 등록돼 있으나 값이 비었는지 / 환경이 일치하는지 확인 필요 |
 | CORS에 배포 프론트엔드 origin 미등록 | `d44e676` 커밋에서 제거됨 |
 | `docs/api-spec.md`가 구버전 명세 | 현재 구현과 불일치 |
 | 개인정보 파기 기능 미커밋 | working tree에만 존재 |

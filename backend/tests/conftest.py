@@ -51,7 +51,6 @@ def _configure_test_database() -> None:
 
     resolved_test_url = test_url.render_as_string(hide_password=False)
     os.environ["DATABASE_URL"] = resolved_test_url
-    os.environ.pop("DATABASE_PUBLIC_URL", None)
 
     backend_dir = Path(__file__).resolve().parents[1]
     alembic_config = Config(str(backend_dir / "alembic.ini"))
@@ -86,7 +85,7 @@ def _engine_is_bound_to_the_test_database() -> None:
         problems.append(
             f"engine is bound to {engine.url.host}/{engine.url.database}"
         )
-    live = os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL") or ""
+    live = os.getenv("DATABASE_URL") or ""
     if live and _target(make_url(live)) != _target(_TEST_URL):
         env_url = make_url(live)
         problems.append(f"DATABASE_URL now points at {env_url.host}/{env_url.database}")

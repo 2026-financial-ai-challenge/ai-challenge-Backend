@@ -11,7 +11,7 @@
 | --- | --- |
 | `CLAWOPS_API_KEY`, `CLAWOPS_ACCOUNT_ID` | 에이전트 생성, 발신, 녹취록 조회 |
 | `CLAWOPS_PHONE_NUMBER` | 발신 번호 (`--from`으로 대신 지정 가능) |
-| `MANAGED_AGENT_REALTIME_MODEL` (선택) | `external_tts`의 두뇌를 모든 시나리오에 강제로 지정. 없으면 `REALTIME_MODEL` 표를 따르고, 표에 없는 시나리오는 `gpt-realtime-2.1-mini` |
+| `MANAGED_AGENT_REALTIME_MODEL` (선택) | `external_tts`의 두뇌를 모든 시나리오에 강제로 지정. 없으면 `REALTIME_MODEL`(`gpt-realtime-2.1`) |
 | `MANAGED_AGENT_LIVE_BACKEND` (선택) | `live`의 업무 모델. 기본 `gpt-5.6-luna` |
 
 ## 1. 에이전트 만들기
@@ -66,7 +66,7 @@ python -m ai.transcript show <callId> --scenario investigation_unit --summary
 | 무엇 | 어디 | 반영 |
 | --- | --- | --- |
 | 목소리 배정 | `CARTESIA_VOICES`, `LIVE_VOICES`, `CARTESIA_SPEED` | sync 필요 |
-| 시나리오별 모델 | `REALTIME_MODEL` | sync 필요 |
+| 모델 | `REALTIME_MODEL` | sync 필요 |
 | 공통 전화 규칙 | `_PHONE_RULES` | sync 필요 |
 | 시나리오 내용 | `ai/scenarios/library.py` | 바로 반영 (sync 불필요) |
 | 화자 판정 | `ai/transcript.py` (`_MIN_OPENING_MATCH`, `_MIN_MARGIN`) | 바로 반영 |

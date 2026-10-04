@@ -92,8 +92,8 @@ LIVE_VOICES: dict[str, str] = {
     "investigation_unit": "ash",
 }
 CARTESIA_SPEED: dict[str, float] = {}
-# 상위 모델: mini는 반대 의미 문장과 이름 오인식이 나왔다(10-03 테스트). family_emergency는 10-01에 콘솔에서 올린 값을 따른다.
-REALTIME_MODEL: dict[str, str] = {"investigation_unit": "gpt-realtime-2.1", "family_emergency": "gpt-realtime-2.1"}
+# 모든 시나리오가 상위 모델을 쓴다. mini는 반대 의미 문장과 이름 오인식이 나왔고(10-03 테스트), 응답 지연은 차이가 없었다.
+REALTIME_MODEL = "gpt-realtime-2.1"
 
 _PHONE_RULES = """
 [전화 규칙]
@@ -229,7 +229,7 @@ def agent_payload(playbook: Playbook, variant: str) -> dict[str, Any]:
             "language": "ko",
             "llm": {
                 "provider": "openai-realtime",
-                "model": os.getenv("MANAGED_AGENT_REALTIME_MODEL") or REALTIME_MODEL.get(playbook.id, "gpt-realtime-2.1-mini"),
+                "model": os.getenv("MANAGED_AGENT_REALTIME_MODEL") or REALTIME_MODEL,
                 # 전화 회선은 far_field 권장(문서). 생략하면 노이즈 감소를 안 한다.
                 "input_audio_noise_reduction": "far_field",
             },

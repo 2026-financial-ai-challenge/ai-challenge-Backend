@@ -291,3 +291,54 @@ def test_access_log_masks_the_link_token():
         == "/v1/web-training/sessions/s1/link"
     )
     assert masked("/v1/sessions/s1/report") == "/v1/sessions/s1/report"
+
+
+# ---- mid-call dispatch ---------------------------------------------------
+
+
+def _connected_call(monkeypatch, scenario_id: str) -> tuple[str, list]:
+    from types import SimpleNamespace
+
+    from app.services import call_service, report_service
+    from app.services.report_service import bind_call
+    from app.services.session_service import attach_call
+
+    session_id, _ = _authenticated_session()
+    bind_call(session_id, "CAmid")
+    attach_call(session_id, "CAmid", scenario_id=scenario_id, agent_variant="external_tts")
+    monkeypatch.setattr(
+        report_service,
+        "_clawops_calls",
+        lambda: SimpleNamespace(get=lambda _id: SimpleNamespace(status="in-progress")),
+    )
+    monkeypatch.setenv("MID_CALL_SMS_DELAY_SEC", "0")
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        web_training_service,
+        "send_sms",
+        lambda to, body: sent.append((to, body)) or "MG123",
+    )
+
+    async def connect_twice() -> None:
+        # ClawOps may deliver the same status more than once.
+        await call_service.handle_call_status_event("CAmid")
+        await call_service.handle_call_status_event("CAmid")
+        await asyncio.gather(*list(call_service._background_tasks))
+
+    asyncio.run(connect_twice())
+    return session_id, sent
+
+
+def test_link_is_texted_during_the_call_once_it_connects(monkeypatch):
+    session_id, sent = _connected_call(monkeypatch, WEB_TRAINING_SCENARIO_ID)
+
+    assert len(sent) == 1
+    assert "/t/" in sent[0][1]
+    assert link_exists(session_id)
+
+
+def test_no_mid_call_text_for_scenarios_without_a_link(monkeypatch):
+    session_id, sent = _connected_call(monkeypatch, "bank_security_hold")
+
+    assert sent == []
+    assert not link_exists(session_id)

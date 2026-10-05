@@ -66,7 +66,12 @@ def list_sessions_for_participant(participant_id: int) -> list[SessionResponse]:
                 selectinload(TrainingSession.participant),
                 selectinload(TrainingSession.calls),
             )
-            .where(TrainingSession.participant_id == participant_id)
+            .where(
+                TrainingSession.participant_id == participant_id,
+                # An unannounced call is the second half of the announced
+                # session's round, reported there, not a round of its own.
+                TrainingSession.current_training_type != "unannounced",
+            )
             .order_by(TrainingSession.created_at.desc())
         )
         return [_to_response(session) for session in sessions]

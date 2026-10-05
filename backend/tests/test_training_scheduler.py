@@ -11,6 +11,7 @@ from app.services.auth_service import hash_password
 from app.services.report_service import _has_scheduled_unannounced_training
 from app.services.session_service import (
     create_session,
+    list_sessions_for_participant,
     reset_sessions,
     update_report_status,
 )
@@ -217,3 +218,18 @@ def test_failed_unannounced_call_leaves_a_pending_report_alone(monkeypatch):
         assert source is not None and source.report_status == "pending"
     # The report finishing later goes straight to final instead of draft.
     assert _has_scheduled_unannounced_training(source_session_id) is False
+
+
+def test_unannounced_session_is_not_listed_as_its_own_round(monkeypatch):
+    source_session_id = _announced_session()
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    schedule_unannounced_training(source_session_id, now=now, delay_seconds=1800)
+    monkeypatch.setenv("CLAWOPS_UNANNOUNCED_PHONE_NUMBER", "07011112222")
+    monkeypatch.setattr(call_service, "start_training_calls", lambda *_args: None)
+    process_due_scheduled_trainings(now=now + timedelta(minutes=31))
+    with SessionLocal() as db:
+        participant_id = db.get(TrainingSession, source_session_id).participant_id
+
+    listed = list_sessions_for_participant(participant_id)
+
+    assert [session.id for session in listed] == [source_session_id]

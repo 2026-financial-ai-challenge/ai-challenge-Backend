@@ -16,8 +16,8 @@ def setup_function() -> None:
 EXPECTED_IDS = {
     "bank_security_hold",
     "low_interest_loan",
-    "delivery_payment_error",
-    "family_emergency",
+    "ipo_allocation",
+    "card_delivery",
     "investigation_unit",
 }
 

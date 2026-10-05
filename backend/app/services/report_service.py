@@ -15,12 +15,14 @@ from app.models.call import Call
 from app.models.scheduled_training import ScheduledTraining
 from app.models.training_report import TrainingReportRecord
 from app.models.transcript_turn import TranscriptTurnRecord
+from app.models.web_training import WebTrainingEvent
 
 from app.schemas.report import (
     BehaviorItem,
     GetReportResponse,
     TrainingReport,
     TranscriptTurn,
+    WebTrainingReport,
 )
 from app.services.session_service import set_session_call_id, update_report_status
 from app.training.scenarios import ensure_ai_importable, get_call_scenario
@@ -48,6 +50,27 @@ DEFENSE_SCORE_WEIGHTS = {
     "송금 거절": 20,
     "전화 종료(빠른 판단)": 15,
     "신고 의사 표현": 12,
+}
+
+# 웹 훈련 이벤트를 전화 훈련과 같은 행동 라벨로 환산한다. 전화에서는 "의사"만
+# 확인되지만 웹에서는 실제 행동이 남으므로, 같은 라벨·같은 가중치를 그대로 쓰되
+# 증거 문구만 웹 맥락으로 표기한다. 매핑이 없는 이벤트(link_opened 등 중립 행동)는
+# 점수에 반영하지 않는다.
+WEB_EVENT_LABELS: dict[str, str] = {
+    "identity_submitted": "개인정보 제공",
+    "case_lookup_submitted": "개인정보 제공",
+    "financial_info_submitted": "금융정보 제공",
+    "app_install_clicked": "앱 설치 의사",
+    "report_clicked": "신고 의사 표현",
+    "left_without_input": "전화 종료(빠른 판단)",
+}
+WEB_EVENT_EVIDENCE: dict[str, str] = {
+    "identity_submitted": "웹 훈련: 본인인증 정보 제출",
+    "case_lookup_submitted": "웹 훈련: 성명으로 사건 조회 시도",
+    "financial_info_submitted": "웹 훈련: 금융정보 입력 제출",
+    "app_install_clicked": "웹 훈련: 안내 앱 설치 버튼 클릭",
+    "report_clicked": "웹 훈련: 의심/신고 버튼 클릭",
+    "left_without_input": "웹 훈련: 정보 입력 없이 이탈",
 }
 
 def _trainee_tried_hangup(trainee_text: str) -> bool:
@@ -151,38 +174,50 @@ def append_turn(
     update_report_status(session_id, "pending")
 
 
+# Unannounced jobs that will never produce a result.
+_ABANDONED_JOB_STATUSES = ("failed", "cancelled")
+
+
 def get_report(session_id: str) -> GetReportResponse:
     with SessionLocal() as db:
         call = _latest_call(db, session_id)
-        draft_turn_rows = db.scalars(
-            select(TranscriptTurnRecord)
-            .where(
-                TranscriptTurnRecord.session_id == session_id,
-                TranscriptTurnRecord.source == "live",
-            )
-            .order_by(TranscriptTurnRecord.sequence)
-        ).all()
-        turns = draft_turn_rows
         reports = db.scalars(
             select(TrainingReportRecord).where(
                 TrainingReportRecord.session_id == session_id
             )
         ).all()
-        draft_row = next((row for row in reports if row.source == "live"), None)
-        final_row = next((row for row in reports if row.source == "clawops"), None)
+        live_row = next((row for row in reports if row.source == "live"), None)
+        clawops_row = next((row for row in reports if row.source == "clawops"), None)
+        # The announced call's own result: the recording-based report when there
+        # is one, else the live draft. Managed calls never write a live report, so
+        # reading only "live" here hid the whole first call.
+        announced_row = clawops_row or live_row
+        announced_turn_rows = _turn_rows(
+            db, session_id, "clawops" if clawops_row is not None else "live"
+        ) or _turn_rows(db, session_id, "live")
+        turns = announced_turn_rows
         unannounced_row = None
         unannounced_turn_rows: list[TranscriptTurnRecord] = []
+        # Each round shows three reports: the first call, the unannounced call,
+        # and the comparison of the two. The comparison only exists when both
+        # calls produced a report; a missing one is shown as "not created".
+        final_report: TrainingReport | None = None
 
         # The unannounced call runs in its own session so retries and call records
         # stay independent. For the user-facing report, however, it is the final
         # result of the original announced-training session.
+        # A job that gave up (failed/cancelled) has no unannounced result to wait
+        # for, so the round ends with the announced call alone.
         scheduled = db.scalar(
             select(ScheduledTraining).where(
-                ScheduledTraining.source_session_id == session_id
+                ScheduledTraining.source_session_id == session_id,
+                ScheduledTraining.status.not_in(_ABANDONED_JOB_STATUSES),
             )
         )
-        if scheduled is not None:
-            final_row = None
+        if scheduled is None:
+            # A live draft alone still waits for the recording-based report.
+            round_done = clawops_row is not None
+        else:
             if scheduled.result_session_id:
                 result_reports = db.scalars(
                     select(TrainingReportRecord).where(
@@ -199,32 +234,30 @@ def get_report(session_id: str) -> GetReportResponse:
                 )
                 if unannounced_row is not None:
                     result_call = _latest_call(db, scheduled.result_session_id)
-                    unannounced_turn_rows = db.scalars(
-                        select(TranscriptTurnRecord)
-                        .where(
-                            TranscriptTurnRecord.session_id
-                            == scheduled.result_session_id,
-                            TranscriptTurnRecord.source
-                            == (
-                                "clawops"
-                                if unannounced_row.source == "clawops"
-                                else "live"
-                            ),
-                        )
-                        .order_by(TranscriptTurnRecord.sequence)
-                    ).all()
+                    unannounced_turn_rows = _turn_rows(
+                        db, scheduled.result_session_id, unannounced_row.source
+                    )
                     call = result_call or call
                     turns = unannounced_turn_rows
-                    if draft_row is not None:
-                        final_row = _combine_reports(
-                            _report_schema(draft_row),
-                            _report_schema(unannounced_row),
-                        )
+                    final_report = _combine_reports(
+                        _report_schema(announced_row),
+                        _report_schema(unannounced_row),
+                    )
+            round_done = unannounced_row is not None or scheduled.status == "completed"
+        web_event_types = db.scalars(
+            select(WebTrainingEvent.event_type)
+            .where(WebTrainingEvent.session_id == session_id)
+            .order_by(WebTrainingEvent.created_at)
+        ).all()
+        web_training = (
+            score_web_events(list(web_event_types)) if web_event_types else None
+        )
+
         status: ReportStatus = (
             "final"
-            if final_row is not None
+            if round_done
             else "draft"
-            if draft_row is not None
+            if announced_row is not None
             else "pending"
             if call is not None or turns
             else "none"
@@ -234,23 +267,29 @@ def get_report(session_id: str) -> GetReportResponse:
             callId=call.clawops_call_id if call is not None else None,
             status=status,
             turns=[TranscriptTurn(role=row.role, text=row.text) for row in turns],
-            draftTurns=_turn_schemas(draft_turn_rows),
+            draftTurns=_turn_schemas(announced_turn_rows),
             unannouncedTurns=_turn_schemas(unannounced_turn_rows),
-            draft=_report_schema(draft_row),
+            draft=_report_schema(announced_row),
             unannounced=_report_schema(unannounced_row),
-            final=(
-                final_row
-                if isinstance(final_row, TrainingReport)
-                else _report_schema(final_row)
-            ),
-            clawopsSummary=(
-                unannounced_row.clawops_summary
-                if unannounced_row is not None
-                else final_row.clawops_summary
-                if isinstance(final_row, TrainingReportRecord)
-                else None
-            ),
+            final=final_report,
+            clawopsSummary=(unannounced_row or announced_row).clawops_summary
+            if (unannounced_row or announced_row) is not None
+            else None,
+            webTraining=web_training,
         )
+
+
+def _turn_rows(db, session_id: str, source: str) -> list[TranscriptTurnRecord]:
+    return list(
+        db.scalars(
+            select(TranscriptTurnRecord)
+            .where(
+                TranscriptTurnRecord.session_id == session_id,
+                TranscriptTurnRecord.source == source,
+            )
+            .order_by(TranscriptTurnRecord.sequence)
+        ).all()
+    )
 
 
 def format_live_turns(turns: list[TranscriptTurn]) -> str:
@@ -413,7 +452,7 @@ async def build_draft_report(
         transcript, source="live", client=client, scenario=scenario
     )
     _save_report(session_id, report, status="draft")
-    status: ReportStatus = "final" if get_report(session_id).final is not None else "draft"
+    status: ReportStatus = "final" if get_report(session_id).status == "final" else "draft"
     update_report_status(session_id, status)
     _mark_source_report_ready(session_id)
     logger.info("Draft report ready session=%s turns=%s", session_id, len(turns))
@@ -535,7 +574,8 @@ def _has_scheduled_unannounced_training(session_id: str) -> bool:
     with SessionLocal() as db:
         return db.scalar(
             select(ScheduledTraining.id).where(
-                ScheduledTraining.source_session_id == session_id
+                ScheduledTraining.source_session_id == session_id,
+                ScheduledTraining.status.not_in(_ABANDONED_JOB_STATUSES),
             )
         ) is not None
 
@@ -842,6 +882,35 @@ def calculate_response_score(
         DEFENSE_SCORE_WEIGHTS.get(label, 0) for label in defense_labels
     )
     return max(0, min(100, score))
+
+
+def score_web_events(event_types: list[str]) -> WebTrainingReport:
+    """웹 훈련 이벤트 목록을 전화와 같은 척도로 채점한다.
+
+    같은 이벤트가 중복으로 들어와도 라벨은 집합으로 모으므로 한 번만 반영된다.
+    """
+    seen: dict[str, str] = {}
+    for event in event_types:
+        label = WEB_EVENT_LABELS.get(event)
+        if label is not None and label not in seen:
+            seen[label] = WEB_EVENT_EVIDENCE.get(event, "웹 훈련")
+
+    risk = [
+        BehaviorItem(label=label, evidence=evidence)
+        for label, evidence in seen.items()
+        if label in RISK_SCORE_WEIGHTS
+    ]
+    defense = [
+        BehaviorItem(label=label, evidence=evidence)
+        for label, evidence in seen.items()
+        if label in DEFENSE_SCORE_WEIGHTS
+    ]
+    return WebTrainingReport(
+        score=calculate_response_score(risk, defense),
+        events=list(dict.fromkeys(event_types)),
+        riskBehaviors=risk,
+        defenseBehaviors=defense,
+    )
 
 
 def _behavior_labels() -> tuple[tuple[str, ...], tuple[str, ...]]:

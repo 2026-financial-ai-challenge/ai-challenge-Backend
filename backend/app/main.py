@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.errors import ApiError
-from app.routers import auth, call, consent, report, session, webhook
+from app.routers import auth, call, consent, report, session, web_training, webhook
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _REPO_DIR = Path(__file__).resolve().parents[2]
@@ -27,6 +28,25 @@ for _env_file in (
     load_dotenv(_env_file, override=False)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
 logging.getLogger("clawops.agent").setLevel(logging.INFO)
+
+
+_WEB_TRAINING_TOKEN_PATH = re.compile(r"^(/v1/web-training/)(?!sessions/)[^/?]+")
+
+
+class _MaskWebTrainingToken(logging.Filter):
+    """접근 로그에서 웹 훈련 링크 토큰을 가린다 — 토큰이 곧 접근 권한이다."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn 접근 로그 args: (client, method, path, http_version, status)
+        if isinstance(record.args, tuple) and len(record.args) >= 3:
+            path = record.args[2]
+            if isinstance(path, str):
+                masked = _WEB_TRAINING_TOKEN_PATH.sub(r"\1***", path)
+                record.args = record.args[:2] + (masked,) + record.args[3:]
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_MaskWebTrainingToken())
 logging.getLogger(__name__).info(
     "Signup SMS: ClawOps (%s) · call AI: PipelineSession (%s)",
     "configured"
@@ -71,6 +91,7 @@ _ALLOWED_ORIGINS = (
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
     "https://safety-phishing-call.vercel.app",
+    "https://gaoncs.vercel.app",
 )
 # Vercel gives every preview deploy its own subdomain, so PR previews would
 # otherwise need a backend redeploy each time to be allowed through.
@@ -117,4 +138,5 @@ app.include_router(auth.router)
 app.include_router(session.router)
 app.include_router(call.router)
 app.include_router(report.router)
+app.include_router(web_training.router)
 app.include_router(webhook.router)

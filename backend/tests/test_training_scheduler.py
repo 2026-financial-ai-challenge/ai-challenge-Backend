@@ -8,7 +8,12 @@ from app.models.scheduled_training import ScheduledTraining
 from app.models.training_session import TrainingSession
 from app.services import call_service
 from app.services.auth_service import hash_password
-from app.services.session_service import create_session, reset_sessions
+from app.services.report_service import _has_scheduled_unannounced_training
+from app.services.session_service import (
+    create_session,
+    reset_sessions,
+    update_report_status,
+)
 from app.services.training_scheduler import (
     complete_unannounced_training,
     process_due_scheduled_trainings,
@@ -168,3 +173,47 @@ def test_completed_unannounced_call_marks_job_completed(monkeypatch):
         assert job is not None
         assert job.status == "completed"
         assert job.completed_at is not None
+
+
+def _exhaust_retries(monkeypatch, source_session_id: str) -> None:
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    schedule_unannounced_training(source_session_id, now=now, delay_seconds=1800)
+    monkeypatch.setenv("CLAWOPS_UNANNOUNCED_PHONE_NUMBER", "07011112222")
+    monkeypatch.setenv("UNANNOUNCED_CALL_MAX_ATTEMPTS", "1")
+    monkeypatch.setattr(call_service, "start_training_calls", lambda *_args: None)
+    process_due_scheduled_trainings(now=now + timedelta(minutes=31))
+    with SessionLocal() as db:
+        job = db.scalar(select(ScheduledTraining))
+        assert job is not None and job.result_session_id is not None
+        result_session_id = job.result_session_id
+    retry_unannounced_training(
+        result_session_id, "call_start_failed", now=now + timedelta(minutes=32)
+    )
+
+
+def test_failed_unannounced_call_releases_the_source_report(monkeypatch):
+    """A draft left waiting on a dead job kept the dashboard "in progress" for good."""
+    source_session_id = _announced_session()
+    update_report_status(source_session_id, "draft")
+
+    _exhaust_retries(monkeypatch, source_session_id)
+
+    with SessionLocal() as db:
+        job = db.scalar(select(ScheduledTraining))
+        source = db.get(TrainingSession, source_session_id)
+        assert job is not None and job.status == "failed"
+        assert source is not None and source.report_status == "final"
+    assert _has_scheduled_unannounced_training(source_session_id) is False
+
+
+def test_failed_unannounced_call_leaves_a_pending_report_alone(monkeypatch):
+    source_session_id = _announced_session()
+    update_report_status(source_session_id, "pending")
+
+    _exhaust_retries(monkeypatch, source_session_id)
+
+    with SessionLocal() as db:
+        source = db.get(TrainingSession, source_session_id)
+        assert source is not None and source.report_status == "pending"
+    # The report finishing later goes straight to final instead of draft.
+    assert _has_scheduled_unannounced_training(source_session_id) is False

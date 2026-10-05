@@ -20,7 +20,7 @@ __all__ = ["HANG_UP", "HANG_UP_TAIL_CHARS", "wants_hang_up"]
 # distinction to keep pushing.
 #
 # "이만" only counts when followed by a closing verb: on its own it is the
-# number 20,000, and delivery_payment_error's incident is 이만 삼천 원.
+# number 20,000 ("이만 삼천 원").
 HANG_UP = re.compile(
     r"끊겠|끊을게|끊습니다|끊는다|전화\s*끊|"
     r"끝낼|끝내겠|끝내죠|끝냅니다|"

@@ -25,6 +25,7 @@ __all__ = [
     "Playbook",
     "SCENARIOS",
     "Scenario",
+    "canonical_id",
     "get_scenario",
     "pick_scenario",
 ]
@@ -37,11 +38,22 @@ SCENARIOS: dict[str, Scenario] = {
 
 # Historical id used by CALL_SCENARIO and by the backend default. Kept so an
 # existing deployment keeps working without an env change.
-_ALIASES = {"voice_phishing_training": DEFAULT_SCENARIO_ID}
+_ALIASES = {
+    "voice_phishing_training": DEFAULT_SCENARIO_ID,
+    # 2026-10-05에 시나리오를 바꾸면서 id도 바꿨다. 예전 통화 기록과 배포 전 백엔드가 계속 찾을 수 있게 남긴다.
+    "delivery_payment_error": "ipo_allocation",
+    "family_emergency": "card_delivery",
+}
 
 # Which scenario the last pick_scenario() handed out, so back-to-back training
 # calls in one process do not repeat themselves.
 _last_picked_id: str | None = None
+
+
+def canonical_id(scenario_id: str) -> str:
+    """별칭을 지금 id로 바꾼다. get_scenario()는 요청한 id를 그대로 남기므로 id 비교에는 이것을 쓴다."""
+    requested = (scenario_id or "").strip()
+    return _ALIASES.get(requested, requested)
 
 
 def get_scenario(scenario_id: str) -> Scenario:
@@ -52,7 +64,7 @@ def get_scenario(scenario_id: str) -> Scenario:
     without breaking the call.
     """
     requested = (scenario_id or "").strip() or DEFAULT_SCENARIO_ID
-    key = _ALIASES.get(requested, requested)
+    key = canonical_id(requested)
     scenario = SCENARIOS.get(key)
     if scenario is None:
         scenario = SCENARIOS[DEFAULT_SCENARIO_ID]

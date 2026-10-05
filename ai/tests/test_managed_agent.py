@@ -21,6 +21,17 @@ def test_base_instructions_carry_safety_style_and_phone_rules():
     assert "절대 지어내지 않는다" in text
 
 
+def test_refusal_rule_has_one_answer():
+    text = ma.base_instructions()
+    assert "포기 경고" in text
+    # 거절에 다른 대응을 시키는 옛 문장이 남으면 모델이 둘 중 아무거나 따른다(10-05 검수)
+    assert "[받아치기]의 거절 대응" not in text
+    assert "상대가 거절하든" not in text
+    for playbook in PLAYBOOKS:
+        for line in playbook.objection_handling:
+            assert "거부하면 더 묻지" not in line and "조른다" not in line, line
+
+
 def test_call_context_drops_progression_before_reply_examples(monkeypatch):
     scenario = get_scenario("bank_security_hold")
     full = ma.build_call_context(scenario)["instruction"]

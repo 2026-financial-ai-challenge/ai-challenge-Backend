@@ -151,6 +151,10 @@ def append_turn(
     update_report_status(session_id, "pending")
 
 
+# Unannounced jobs that will never produce a result.
+_ABANDONED_JOB_STATUSES = ("failed", "cancelled")
+
+
 def get_report(session_id: str) -> GetReportResponse:
     with SessionLocal() as db:
         call = _latest_call(db, session_id)
@@ -176,9 +180,12 @@ def get_report(session_id: str) -> GetReportResponse:
         # The unannounced call runs in its own session so retries and call records
         # stay independent. For the user-facing report, however, it is the final
         # result of the original announced-training session.
+        # A job that gave up (failed/cancelled) has no unannounced result to wait
+        # for, so the announced call's own report is the final one.
         scheduled = db.scalar(
             select(ScheduledTraining).where(
-                ScheduledTraining.source_session_id == session_id
+                ScheduledTraining.source_session_id == session_id,
+                ScheduledTraining.status.not_in(_ABANDONED_JOB_STATUSES),
             )
         )
         if scheduled is not None:
@@ -535,7 +542,8 @@ def _has_scheduled_unannounced_training(session_id: str) -> bool:
     with SessionLocal() as db:
         return db.scalar(
             select(ScheduledTraining.id).where(
-                ScheduledTraining.source_session_id == session_id
+                ScheduledTraining.source_session_id == session_id,
+                ScheduledTraining.status.not_in(_ABANDONED_JOB_STATUSES),
             )
         ) is not None
 

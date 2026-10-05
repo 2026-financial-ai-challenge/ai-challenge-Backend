@@ -1,11 +1,11 @@
 """통화 도중 문자로 보내는 가상 사건 조회 포털 링크(통화 중 발송안).
 
 investigation_unit 통화 중에 링크를 훈련자에게 문자로 보낸다. 통화 대사(library.py)도
-'방금 문자를 보냈다'로 맞춰져 있다. 훈련자가 링크에서 개인정보를 제출하면 프론트가 경고를 띄우고
+'문자를 보냈다'로 맞춰져 있다. 훈련자가 링크에서 개인정보를 제출하면 프론트가 경고를 띄우고
 백엔드가 링크를 닫는다.
 
 백엔드(call_service.py)는 통화가 연결되면 send_after_seconds 뒤에 문자를 보낸다(통화가 그 전에 끝나면 종료 후).
-문구는 아직 web_training_service.py의 자체 문구를 쓰고, 위험 행동 때 통화를 끊는 것(ends_call)도 아직 없다.
+문구는 web_training_service.py가 실제로 보내는 것과 같게 두고, 위험 행동 때 통화를 끊는 것(ends_call)도 아직 없다.
 이벤트 이름은 백엔드 WEB_EVENT_TYPES(backend/app/models/web_training.py)와 같게 둔다.
 
 문장은 시나리오 문장과 같은 안전 기준을 지킨다(ai/tests/test_portal_link.py).
@@ -50,10 +50,7 @@ class PortalLink:
 PORTAL_LINKS: dict[str, PortalLink] = {
     "investigation_unit": PortalLink(
         scenario_id="investigation_unit",
-        sms_body=(
-            "[금융범죄 합동대응반] 자산보전과 서재욱 조사관입니다.\n"
-            "방금 통화드린 사건의 열람 안내입니다. 가온형사사법지원포털 '나의 사건 조회'에서 성함으로 확인해 주세요."
-        ),
+        sms_body="[가온형사사법지원포털] 등기송달 열람 안내입니다. 본인 확인 후 열람하세요.",
         send_after_seconds=40,
         ends_call=True,
         warnings={

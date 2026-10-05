@@ -23,8 +23,7 @@ def test_portal_matches_scenario_and_events():
         assert link.scenario_id == scenario_id
         assert set(link.warnings) == set(TERMINAL_EVENTS)
         playbook = {p.id: p for p in PLAYBOOKS}[scenario_id]
-        # 문자는 '방금 통화드린' 조사관이 보내고, 통화 중 말한 포털 이름과 같아야 한다
-        assert playbook.persona_name in link.sms_body
+        # 문자는 통화 중 말한 포털 이름과 같아야 한다
         assert "가온형사사법지원포털" in link.sms_body
         assert "가온형사사법지원포털" in playbook.incident
         assert link.send_after_seconds > 0
@@ -36,6 +35,13 @@ def test_events_match_backend():
     src = (Path(__file__).parents[2] / "backend/app/models/web_training.py").read_text(encoding="utf-8")
     block = re.search(r"WEB_EVENT_TYPES = \((.*?)\n\)", src, re.S).group(1)
     assert set(PORTAL_EVENTS) <= set(re.findall(r'"(\w+)"', block))
+
+
+def test_sms_body_matches_backend():
+    # 실제 문자는 백엔드가 보낸다. 문구가 어긋나지 않게 백엔드 파일에 같은 문장이 있는지 본다
+    src = (Path(__file__).parents[2] / "backend/app/services/web_training_service.py").read_text(encoding="utf-8")
+    for link in PORTAL_LINKS.values():
+        assert link.sms_body in src
 
 
 def test_link_for():

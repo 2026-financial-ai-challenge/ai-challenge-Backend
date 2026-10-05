@@ -25,6 +25,7 @@ __all__ = [
     "Playbook",
     "SCENARIOS",
     "Scenario",
+    "canonical_id",
     "get_scenario",
     "pick_scenario",
 ]
@@ -47,6 +48,12 @@ _ALIASES = {
 # Which scenario the last pick_scenario() handed out, so back-to-back training
 # calls in one process do not repeat themselves.
 _last_picked_id: str | None = None
+
+
+def canonical_id(scenario_id: str) -> str:
+    """별칭을 지금 id로 바꾼다. get_scenario()는 요청한 id를 그대로 남기므로 id 비교에는 이것을 쓴다."""
+    requested = (scenario_id or "").strip()
+    return _ALIASES.get(requested, requested)
 
 
 def get_scenario(scenario_id: str) -> Scenario:

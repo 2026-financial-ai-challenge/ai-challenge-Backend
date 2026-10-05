@@ -51,6 +51,9 @@ def test_call_context_fits_and_carries_the_scenario(scenario_id):
     assert len(instruction) <= ma.CALL_CONTEXT_LIMIT
     assert instruction.startswith("[첫 마디]\n" + scenario.opening_line)
     assert scenario.hangup_line in instruction
+    # 포기 경고는 인물마다 다르다. 비면 공통 규칙이 가리킬 문장이 없다.
+    giveup = ma._playbook_for(scenario).giveup_line
+    assert giveup and f"[거절할 때 경고]\n{giveup}" in instruction
     assert f"최대 {scenario.max_turns}번" in instruction
     assert "[사건" in instruction and "[받아치기]" in instruction
     assert ctx["variables"]["scenario_id"] == scenario_id

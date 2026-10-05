@@ -106,6 +106,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             ("busy_now", "일 분이면 됩니다. 대기 중인 결제가 십 분 뒤에 승인돼서요."),
         ),
         hangup_line="지금 끊으시면 대기 중인 이백구십만 원은 보류가 풀린 채로 승인됩니다.",
+        giveup_line="접수를 안 하시면 이 건은 본인 승인으로 처리되고, 이후 피해는 보상이 어렵습니다.",
         # 중저음 남성. 창구 권위
         tts_voice_id=Onyu,
         progression=(
@@ -215,6 +216,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             ("busy_now", "일 분이면 끝나요. 오늘 안에 접수 안 하시면 순번이 넘어가서요."),
         ),
         hangup_line="그럼 오늘 순번은 대기자분께 넘기겠습니다. 나중에 다시 신청하셔도 이 금리는 안 나와요.",
+        giveup_line="오늘 진행 안 하시면 대환 승인은 취소되고 지금 금리 그대로 가셔야 해요.",
         tts_voice_id=Kelee_K,
         progression=(
             "지금 쓰시는 대출을 연 사 퍼센트대로 갈아타 드리고요, 한도는 최대 삼천만 원까지 나와요.",
@@ -324,6 +326,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             ("busy_now", "일 분이면 돼요. 마감이 세 시간 남아서 먼저 연락드렸어요."),
         ),
         hangup_line="지금 끊으시면 배정 물량은 대기 고객님께 넘어가요. 이 가격은 다시 안 나와요.",
+        giveup_line="이번에 안 하시면 우선 배정 명단에서 빠지세요. 다음 기회는 저도 장담 못 해요.",
         # 서울 억양의 부드러운 상담 톤
         tts_voice_id=THEO,
         progression=(
@@ -434,6 +437,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             ("busy_now", "금방 끝나요. 배송 건 하나만 확인할게요."),
         ),
         hangup_line="지금 끊으시면 이 카드는 그대로 전달 처리돼요. 그다음은 저도 못 막아요.",
+        giveup_line="확인을 안 해 주시면 반송 처리할 수밖에 없어요. 그 뒤는 카드사에 직접 하셔야 돼요.",
         # 무뚝뚝한 젊은 기사. 쓸 수 있는 목소리 중에서 고른 값입니다.
         tts_voice_id=Kelee_K,
         progression=(
@@ -549,7 +553,8 @@ PLAYBOOKS: tuple[Playbook, ...] = (
             ("who_is_this", "금융범죄 합동대응반 자산보전과 서재욱 조사관입니다. 조사 회선이라 발신 정보는 안내되지 않습니다."),
             ("busy_now", "오늘 안에 끝나야 하는 절차입니다. 지금 이 자리에서 진행합니다."),
         ),
-        hangup_line="지금 끊으시면 종료 시점이 그대로 기록됩니다.",
+        hangup_line="지금 끊으시면 조사 거부로 기록되고, 공범 수사로 넘어갑니다.",
+        giveup_line="협조를 거부하시면 피해자가 아니라 공범 혐의로 조사 방향이 바뀔 수 있습니다.",
         # 남성. 감정 없는 조사관
         tts_voice_id=YOHAN_KOO,
         progression=(

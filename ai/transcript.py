@@ -79,7 +79,7 @@ def _bigrams(text: str) -> set[str]:
 
 def _reference_lines(scenario) -> tuple[str, list[str]]:
     opening = getattr(scenario, "opening_line", "") or ""
-    lines = [getattr(scenario, "hangup_line", "") or ""]
+    lines = [getattr(scenario, "hangup_line", "") or "", getattr(scenario, "giveup_line", "") or ""]
     lines += [reply for _t, reply in getattr(scenario, "quick_replies", ()) or ()]
     lines += list(getattr(scenario, "progression", ()) or ())
     for reply in getattr(scenario, "script", ()) or ():

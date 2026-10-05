@@ -71,6 +71,8 @@ AWS Lightsail **서울** 리전의 Ubuntu 서버 한 대에 `compose.prod.yaml`�
    git pull && docker compose -f compose.prod.yaml up -d --build
    ```
 
+처음 한 번은 직접 실행하고, 이후에는 `develop`에 push될 때마다 GitHub Actions([`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml))가 서버에 SSH로 들어가 같은 명령을 실행합니다. 저장소 Secrets에 `LIGHTSAIL_HOST`·`LIGHTSAIL_USER`·`LIGHTSAIL_SSH_KEY`·`DEPLOY_PATH`를 등록해야 하고, 서버의 저장소는 `develop` 브랜치를 받아 두어야 합니다.
+
 `start.sh`가 컨테이너 시작 시 `alembic upgrade head`를 최대 10회 재시도한 뒤 `uvicorn`을 기동합니다.
 
 배포 후 ClawOps 콘솔의 전사 웹훅은 `https://<DOMAIN>/v1/webhooks/clawops/transcript`로, 프론트엔드(Vercel)의 `NEXT_PUBLIC_API_BASE_URL`은 `https://<DOMAIN>`으로 맞춥니다.

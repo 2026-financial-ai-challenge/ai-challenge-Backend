@@ -11,6 +11,7 @@ from app.database import SessionLocal
 from app.errors import ApiError
 from app.models.web_training import (
     WEB_EVENT_TYPES,
+    WEB_RISK_EVENT_TYPES,
     WebTrainingEvent,
     WebTrainingLink,
 )
@@ -99,17 +100,32 @@ def _resolve_active_link(db, token: str) -> WebTrainingLink:
 
 
 def verify_link(token: str) -> None:
-    """``/t/{token}`` 진입 시 링크가 살아 있는지만 확인한다 (행동 기록 없음)."""
+    """``/t/{token}`` 진입 시 링크가 살아 있는지만 확인한다 (행동 기록 없음).
+
+    위험 행동으로 닫힌 링크는 다시 열 수 없다. 프론트가 같은 브라우저에서만
+    막으면 다른 기기에서는 그대로 열리므로 서버가 410으로 막는다.
+    """
     with SessionLocal() as db:
-        _resolve_active_link(db, token)
+        link = _resolve_active_link(db, token)
+        if link.closed_at is not None:
+            raise ApiError(410, "WEB_LINK_CLOSED", "이미 종료된 훈련입니다.")
 
 
 def record_event(token: str, event_type: str) -> None:
-    """훈련자의 웹 행동 1건을 기록한다. 같은 행동 재전송은 조용히 무시한다."""
+    """훈련자의 웹 행동 1건을 기록한다. 같은 행동 재전송은 조용히 무시한다.
+
+    위험 행동이면 링크를 닫는다. 닫힌 뒤에도 이미 열려 있는 페이지가 보내는
+    이벤트(예: 결과 화면에서 누른 신고)는 만료 전까지 받아 채점에 반영한다 —
+    막는 것은 재진입(``verify_link``)뿐이다.
+    """
     if event_type not in WEB_EVENT_TYPES:
         raise ApiError(400, "WEB_EVENT_INVALID", "알 수 없는 이벤트입니다.")
     with SessionLocal() as db:
         link = _resolve_active_link(db, token)
+        if event_type in WEB_RISK_EVENT_TYPES and link.closed_at is None:
+            link.closed_at = datetime.now(timezone.utc)
+            # 따로 커밋한다 — 아래 중복 이벤트 롤백이 닫힘까지 되돌리지 않도록.
+            db.commit()
         db.add(
             WebTrainingEvent(
                 token=token,

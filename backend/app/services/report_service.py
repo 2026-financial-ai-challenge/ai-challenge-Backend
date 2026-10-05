@@ -94,6 +94,25 @@ def session_id_for_call(call_id: str) -> str | None:
         return db.scalar(select(Call.session_id).where(Call.clawops_call_id == call_id))
 
 
+def _scenario_for_call(call_id: str):
+    """The scenario this call actually ran, for scoring and coaching.
+
+    Calls placed before scenario_id was recorded have none; get_call_scenario()
+    then picks the default, which is what the whole report used to be scored
+    against no matter which scam the trainee actually heard.
+    """
+    with SessionLocal() as db:
+        scenario_id = db.scalar(
+            select(Call.scenario_id).where(Call.clawops_call_id == call_id)
+        )
+    ensure_ai_importable()
+    if not scenario_id:
+        return get_call_scenario()
+    from ai.scenarios import get_scenario
+
+    return get_scenario(scenario_id)
+
+
 def bind_call(session_id: str, call_id: str) -> None:
     set_session_call_id(session_id, call_id)
     update_report_status(session_id, "pending")
@@ -244,16 +263,56 @@ def format_live_turns(turns: list[TranscriptTurn]) -> str:
     return "\n".join(lines)
 
 
-def format_clawops_segments(segments: Any) -> str:
+def format_clawops_segments(segments: Any, agent_speaker: str | None = None) -> str:
     lines: list[str] = []
     for segment in segments or []:
-        speaker_raw = _attr(segment, "speaker")
         text = str(_attr(segment, "text") or "").strip()
         if not text:
             continue
-        speaker = "훈련자" if speaker_raw == "CUSTOMER" else "상대"
+        speaker = "훈련자" if _is_trainee(segment, agent_speaker) else "상대"
         lines.append(f"[{speaker}] {text}")
     return "\n".join(lines)
+
+
+def _is_trainee(segment: Any, agent_speaker: str | None) -> bool:
+    """Transcripts since 2026-08 label speakers speaker_0/1/... with no fixed
+    mapping to roles, so the AI's speaker is worked out from what it said
+    (agent_speaker_for). Without one, fall back to the old AGENT/CUSTOMER
+    labels."""
+    speaker = _attr(segment, "speaker")
+    if agent_speaker is None:
+        return speaker == "CUSTOMER"
+    return speaker != agent_speaker
+
+
+def agent_speaker_for(segments: Any, scenario: Any) -> str | None:
+    ensure_ai_importable()
+    from ai.transcript import identify_agent_speaker
+
+    return identify_agent_speaker(segments or [], scenario)
+
+
+def _audit_agent_speech(call_id: str, segments: Any, agent_speaker: str | None) -> None:
+    """Managed agents speak straight from ClawOps, so nothing can block a bad
+    line mid-call. Check the transcript afterwards and log every slip so the
+    shared instructions can be fixed."""
+    if agent_speaker is None:
+        return
+    ensure_ai_importable()
+    from ai.harness import audit_transcript
+
+    agent_texts = [
+        str(_attr(s, "text") or "")
+        for s in segments or []
+        if _attr(s, "speaker") == agent_speaker
+    ]
+    for finding in audit_transcript(agent_texts):
+        logger.warning(
+            "Safety audit call_id=%s kind=%s text=%s",
+            call_id,
+            finding["kind"],
+            finding["text"],
+        )
 
 
 def heuristic_report(transcript: str, *, source: Literal["live", "clawops"]) -> TrainingReport:
@@ -421,15 +480,24 @@ async def build_final_report(
         )
         return None
 
-    transcript = format_clawops_segments(segments)
+    scenario = _scenario_for_call(call_id)
+    agent_speaker = agent_speaker_for(segments, scenario)
+    if agent_speaker is None:
+        logger.warning(
+            "Could not tell the AI speaker apart call_id=%s; using CUSTOMER labels",
+            call_id,
+        )
+    _audit_agent_speech(call_id, segments, agent_speaker)
+    transcript = format_clawops_segments(segments, agent_speaker)
     summary = await asyncio.to_thread(fetch_clawops_summary, call_id)
     report = await score_conversation(
         transcript,
         source="clawops",
         clawops_summary=summary,
         client=client,
+        scenario=scenario,
     )
-    _replace_clawops_turns(session_id, call_id, segments)
+    _replace_clawops_turns(session_id, call_id, segments, agent_speaker)
     _save_report(
         session_id,
         report,
@@ -667,7 +735,12 @@ def _save_report(
                 setattr(row, key, value)
 
 
-def _replace_clawops_turns(session_id: str, call_id: str, segments: Any) -> None:
+def _replace_clawops_turns(
+    session_id: str,
+    call_id: str,
+    segments: Any,
+    agent_speaker: str | None = None,
+) -> None:
     with SessionLocal.begin() as db:
         call = _get_call(db, call_id)
         db.execute(
@@ -686,7 +759,7 @@ def _replace_clawops_turns(session_id: str, call_id: str, segments: Any) -> None
                 TranscriptTurnRecord(
                     session_id=session_id,
                     call_id=call.id if call is not None else None,
-                    role="user" if _attr(segment, "speaker") == "CUSTOMER" else "assistant",
+                    role="user" if _is_trainee(segment, agent_speaker) else "assistant",
                     text=text,
                     source="clawops",
                     sequence=sequence,
@@ -793,8 +866,7 @@ def _report_llm_attempts() -> list[tuple[str, Any, str]]:
 
     Both providers are reachable through the OpenAI-compatible chat.completions
     shape (Gemini via its own compatible endpoint -- see
-    ai/scenarios/generator.py, which already proves response_format=json_object
-    works there), so the same call works against either client. Only the ones
+    ai/llm_stream.py, which uses the same endpoint), so the same call works against either client. Only the ones
     whose API key is actually configured are attempted; if neither is, the
     caller gets a clear error instead of an opaque auth failure.
     """

@@ -50,7 +50,7 @@ REFLEX_TRIGGERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         "who_is_this",
-        re.compile(r"누구(세|시|신|야|냐)|어디(세요|시죠|신데|에요|예요|야|서)|무슨\s*일|왜\s*전화"),
+        re.compile(r"누구(세|시|신|야|냐)|어디(세요|시죠|신데|에요|예요|야|서|라고)|무슨\s*일|왜\s*전화"),
     ),
     (
         "busy_now",

@@ -21,6 +21,27 @@
 > 나오지 않습니다.** 아래 항목들은 그 위에서 추가로 얻는 이득입니다.
 
 
+## 2026-09-24 추가 적용 (방안 A)
+
+| 무엇 | 어디 | 턴당 절감 |
+| --- | --- | --- |
+| clawops의 매 턴 0.5초 debounce → 0.1초 | `pipeline_session._debounced_respond` · `CALL_RESPONSE_DEBOUNCE_SEC` | **약 400ms** (거의 모든 턴) |
+| OpenAI 클라이언트를 통화당 1개로 유지 (clawops는 매 턴 새 HTTPS 연결) | `app/training/openai_llm.py` | 약 100~300ms (TLS 핸드셰이크) |
+| 벨이 울리는 동안 LLM 연결 미리 열기 | `PhonePipelineSession.prewarm` | 첫 턴 핸드셰이크 |
+| `STT_ENDPOINTING_MS` 400 → 300 | `call_service.build_pipeline_session` | 약 100ms |
+| 고정 대사 사전 합성(ulaw_8000) → 재생은 바이트 복사 | `ai/prerender.py` | 해당 턴 TTS 왕복 전체 |
+| 맞장구("네", "음")에는 말을 끊지 않음 | `is_backchannel` | 체감 자연스러움 |
+| 끊긴 대사는 들린 만큼만 히스토리에 남김 | `PlaybackClock` · `_note_interruption` | 다음 답의 맥락 정확도 |
+
+> `backend/.env`에 `STT_ENDPOINTING_MS=400`이 명시돼 있으면 코드 기본값(300)보다 우선합니다.
+> 기존 값을 지우거나 300으로 바꾸십시오.
+>
+> **배포 리전:** ClawOps 미디어 서버는 GCP 서울(asia-northeast3)에 있습니다. 백엔드가
+> 해외 리전에 있으면 오디오가 매 프레임 태평양을 왕복합니다. 서울 또는 도쿄 리전을 권장합니다.
+>
+> **Gemini 경로:** clawops의 GeminiLLM도 매 턴 클라이언트를 새로 만듭니다. OpenAI처럼
+> 연결 유지 버전은 아직 없으므로 지연이 중요하면 `CALL_LLM_PROVIDER=openai`(유료 키)를 권장합니다.
+
 훈련 통화에서 사용자가 체감하는 지연은 두 군데에 있습니다.
 
 1. **전화가 울리기까지** — 발신 버튼을 누르고 실제로 통화가 시작될 때까지
@@ -28,18 +49,12 @@
 
 ## 1. 전화가 울리기까지
 
-예전에는 통화를 걸기 전에 LLM으로 시나리오를 새로 썼습니다.
-
-`ai/scenarios/generator.py`의 `generate_scenario`는 한 번 시도할 때마다
-**생성 호출 1회 + 검수 호출 1회**를 하고, 검수 점수가 팔십 점 미만이면
-실패 사유를 되먹여 최대 세 번까지 다시 만듭니다. 즉 **LLM 왕복 2~6회**입니다.
-`call_service.py`는 여기에 `SCENARIO_GENERATION_TIMEOUT_SEC`(기본 20초)의
-상한을 걸어 두었고, 타임아웃이 나면 그 20초를 다 쓰고 나서야 폴백했습니다.
+예전에는 통화를 걸기 전에 LLM으로 시나리오를 새로 썼습니다(생성+검수, 최대 LLM 왕복 6회,
+타임아웃 20초). 이 동적 생성은 2026-09-24에 삭제했습니다.
 
 지금은 `ai/scenarios/library.py`의 고정 시나리오 다섯 편 중 하나를
-프로세스 안에서 고릅니다. **LLM 왕복 0회.**
-
-`DYNAMIC_SCENARIO=true`로 두면 예전 동작으로 돌아갑니다.
+프로세스 안에서 고릅니다. **LLM 왕복 0회.** 벨이 울리는 동안에는 그 시나리오의
+고정 대사를 미리 합성합니다(`ai/prerender.py`).
 
 ## 2. 한 턴의 응답 지연
 
@@ -88,8 +103,8 @@ multilingual v2와의 실제 차이는 회선에서 직접 재 보십시오.
 
 Gemini는 **숨은 thinking 토큰도 출력 예산에서 깎습니다.** 상한을 120처럼 낮게 잡으면
 thinking이 예산을 다 먹고 본문이 빈 채로 돌아올 수 있고, 전화에서 그건 느린 답변이
-아니라 **무음**입니다. `ai/scenarios/generator.py`의 주석이 실제로 그 현상
-("sometimes empty content")을 기록해 두었습니다.
+아니라 **무음**입니다. 비-lite 모델에서 실제로 본문이 빈 응답("sometimes empty
+content")이 관측됐습니다.
 
 그래서 기본값을 갈랐습니다. OpenAI는 120, Gemini는 512입니다.
 길이 통제는 이미 프롬프트의 "짧은 문장 두 개까지" 규칙이 하고 있어서

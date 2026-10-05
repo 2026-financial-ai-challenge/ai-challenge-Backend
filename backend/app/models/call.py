@@ -20,6 +20,11 @@ class Call(Base):
         String(80), unique=True, index=True
     )
     status: Mapped[str] = mapped_column(String(30), default="calling")
+    # Which scenario this call actually ran, so the report is scored against it
+    # rather than against whatever get_call_scenario() defaults to, and which
+    # agent variant spoke it, so external_tts and live can be compared.
+    scenario_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_variant: Mapped[str | None] = mapped_column(String(20), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

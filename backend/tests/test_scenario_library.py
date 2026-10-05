@@ -34,9 +34,11 @@ def test_library_covers_every_expected_scenario():
         assert 6 <= scenario.max_turns <= 10
 
 
-def test_library_text_passes_the_generator_safety_gates():
-    """Fixed scenarios must clear the same bars a generated one has to clear."""
-    from ai.scenarios.generator import _REAL_ORGS, _SPOKEN_META, _UNSAFE_TOKEN
+def test_library_text_passes_the_safety_gates():
+    """Every line that can reach the prompt or the phone clears ai/safety.py."""
+    from ai.safety import REAL_ORGS as _REAL_ORGS
+    from ai.safety import SPOKEN_META as _SPOKEN_META
+    from ai.safety import UNSAFE_TOKEN as _UNSAFE_TOKEN
     from ai.scenarios.library import PLAYBOOKS
 
     for playbook in PLAYBOOKS:
@@ -56,6 +58,9 @@ def test_library_text_passes_the_generator_safety_gates():
             *playbook.red_flags,
             *(line for pair in playbook.examples for line in pair),
             *(reply for _trigger, reply in playbook.quick_replies),
+            # Spoken verbatim in script mode, so held to the same bar.
+            *playbook.progression,
+            *(line for reply in playbook.script for line in reply.lines),
         ]
         for value in values:
             assert not _SPOKEN_META.search(value), (playbook.id, value)
@@ -123,22 +128,16 @@ def test_pick_scenario_never_repeats_back_to_back():
     assert len(set(picks)) >= 3
 
 
-def test_runtime_scenario_makes_no_llm_call(monkeypatch):
-    monkeypatch.setenv("DYNAMIC_SCENARIO", "false")
+def test_runtime_scenario_comes_from_the_fixed_library(monkeypatch):
+    """Scenarios are written ahead of time, never per call: the script mode
+    needs every line known before the phone rings so it can be prerendered."""
     monkeypatch.delenv("CALL_SCENARIO", raising=False)
-
-    from ai.scenarios import generator
-
-    def explode(*_args, **_kwargs):
-        raise AssertionError("scenario generation must not run on the call path")
-
-    monkeypatch.setattr(generator, "generate_scenario", explode)
     scenario = asyncio.run(get_runtime_scenario())
     assert scenario.id in EXPECTED_IDS
+    assert scenario.progression and scenario.script
 
 
 def test_pinned_scenario_disables_rotation(monkeypatch):
-    monkeypatch.setenv("DYNAMIC_SCENARIO", "false")
     monkeypatch.setenv("CALL_SCENARIO", "investigation_unit")
     scenario = asyncio.run(get_runtime_scenario())
     assert scenario.id == "investigation_unit"

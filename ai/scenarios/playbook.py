@@ -15,9 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ai.safety import SAFETY_RULES
+from ai.scenarios.script import ScriptReply
 from ai.scenarios.types import Scenario
 
-__all__ = ["Playbook", "build_system_prompt"]
+__all__ = ["Playbook", "ScriptReply", "build_scenario_block", "build_system_prompt"]
 
 
 # Every sentence still has to end in punctuation the pipeline can split on
@@ -28,7 +29,7 @@ _STYLE_RULES = """
 - 글이 아니라 말이다. 안내문이나 공지를 읽는 투로 말하지 않는다.
 - 한 번에 짧은 문장 두 개까지만 말한다. 첫 문장은 특히 짧게 시작한다.
 - 모든 문장을 마침표, 물음표, 느낌표 중 하나로 끝낸다.
-- 상대가 방금 쓴 단어를 하나 골라 되받아 쓴다. 그래야 듣고 있는 사람으로 들린다.
+- 상대 말에 바로 답한다. "~라고 하셨죠", "~라고 확인하셨습니다" 처럼 상대 말을 되풀이하지 않는다. 따라 하면 상대가 거슬려 한다.
 - 한 마디로 끊어 치는 대답을 섞는다. "네?", "아니요.", "잠깐만요." 처럼 짧아도 된다.
 - 말을 하다 고쳐 잡아도 된다. "아니, 그게 아니라" 처럼 자연스럽게 이어 간다.
 - "음", "아", "그러니까", "저기" 같은 군말을 필요할 때만 섞는다. 매번 넣지 않는다.
@@ -70,17 +71,29 @@ class Playbook:
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
     tts_voice_id: str | None = None
+    # Pre-written lines for the script call mode. Unlike turn_plan these ARE
+    # spoken verbatim, so each one must read as a finished caller line: one
+    # or two short sentences that fit wherever that step or intent comes up.
+    progression: tuple[str, ...] = ()
+    script: tuple[ScriptReply, ...] = ()
 
 
 def build_system_prompt(playbook: Playbook) -> str:
     """Compile a playbook into the system prompt for the live call."""
+    return "\n\n".join([SAFETY_RULES, _STYLE_RULES, build_scenario_block(playbook)]).strip()
+
+
+def build_scenario_block(playbook: Playbook) -> str:
+    """The scenario-specific part of the prompt, without the shared rules.
+
+    The managed-agent path (ai/managed_agent.py) keeps the shared rules on the
+    agent itself and sends only this block per call, as its CallContext.
+    """
     plan = "\n".join(
         f"{index}. {step}" for index, step in enumerate(playbook.turn_plan, 1)
     )
     objections = "\n".join(f"- {item}" for item in playbook.objection_handling)
     sections = [
-        SAFETY_RULES,
-        _STYLE_RULES,
         f"""[역할]
 {playbook.role}
 교육용 가상 인물이지만 상대가 눈치채지 못하게 끝까지 역할을 유지한다.
@@ -122,4 +135,6 @@ def to_scenario(playbook: Playbook) -> Scenario:
         ideal_trainee_response=playbook.ideal_trainee_response,
         quick_replies=playbook.quick_replies,
         hangup_line=playbook.hangup_line,
+        progression=playbook.progression,
+        script=playbook.script,
     )

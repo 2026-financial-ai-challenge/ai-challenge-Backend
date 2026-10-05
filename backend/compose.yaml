@@ -14,6 +14,18 @@ services:
     environment:
       UVICORN_RELOAD: "1"
     command: sh start.sh
+  redis:
+    image: redis:7-alpine
+    container_name: safety-phishing-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
   db:
     image: postgres:16
     container_name: safety-phishing-db
@@ -34,3 +46,5 @@ services:
 volumes:
   postgres_data:
     name: backend_postgres_data
+  redis_data:
+    name: backend_redis_data

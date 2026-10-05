@@ -5,8 +5,9 @@ costs no network call, so a training call no longer waits on an LLM before the
 phone rings. The live in-call LLM is the only thing that still hits an API key,
 and it treats the scenario as its guideline rather than a script.
 
-ai/scenarios/generator.py can still write a scenario with an LLM, but only
-when DYNAMIC_SCENARIO is turned on.
+There is no per-call generation: the script mode speaks pre-written lines
+that are synthesized before the call (ai/prerender.py), which a scenario
+written seconds before dialing could not have.
 """
 
 from __future__ import annotations

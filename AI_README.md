@@ -37,7 +37,10 @@ FastAPI 서버(`backend/app`)와 로컬 개발 하네스가 이 패키지를 **�
 | `audio_io.py` | 마이크 / 스피커 어댑터 | ✕ | ○ |
 | `conversation_pipeline.py` | 위 네 개를 이어 붙인 한 턴 | ✕ | ○ |
 | `test_latency.py` · `test_stt.py` | 측정 하네스 | ✕ | ○ |
-| `scenario_demo.py` | 생성 결과 육안 확인용 스크립트 | ✕ | ✕ |
+| `harness.py` | 문장 가드 + 통화 모니터 (docs/harness.md) | ○ | ✕ |
+| `scenarios/intents.py` · `scenarios/script.py` | 대본 모드 의도 분류·라우터 (docs/script-mode.md) | ○ | ✕ |
+| `prerender.py` | 고정 대사 사전 합성·캐시 (`python -m ai.prerender`) | ○ | ✕ |
+| `script_eval.py` | 대본 적중률·정확도 측정 (`python -m ai.script_eval`) | ✕ | ✕ |
 
 **△ 표시가 중요합니다.** 전화 경로는 `classifier.py`에서 **라벨 튜플만** 가져다 쓰고
 (`RISK_LABELS`, `DEFENSE_LABELS`), 분류 호출은 `report_service.py`가 자체적으로 합니다.
@@ -65,6 +68,7 @@ Playbook (ai/scenarios/library.py, 수기 작성)
   ├ goal / turn_plan / objection_handling 무엇을 얻으려 하고 어떻게 받아치는가
   ├ examples                              퓨샷 — 길이와 말투를 여기서 가르친다
   ├ quick_replies / hangup_line           LLM 없이 답할 발화
+  ├ progression / script                  대본 모드에서 그대로 읽는 대사 (미리 합성)
   └ tactics / red_flags / ideal_...       통화 후 리포트 채점 기준으로 재사용
 
         ↓ playbook.py : build_system_prompt() + to_scenario()
@@ -83,11 +87,11 @@ Scenario.system_prompt = SAFETY_RULES + _STYLE_RULES + 시나리오 블록 + 퓨
 
 | `id` | 시나리오 | 유형 | 난이도 | `max_turns` |
 | --- | --- | --- | :---: | :---: |
-| `bank_security_hold` | 해외 결제 보류 확인 | 기관사칭형 | 중 | 8 |
-| `low_interest_loan` | 저금리 대환대출 보증료 | 대출사기형 | 하 | 7 |
+| `bank_security_hold` | 해외 결제 승인 가로채기 | 기관사칭형 | 중 | 8 |
+| `low_interest_loan` | 대환대출 선상환 요구 | 대출사기형 | 하 | 7 |
 | `delivery_payment_error` | 이중 결제 환불 확인 | 결제사칭형 | 하 | 8 |
-| `family_emergency` | 액정 깨진 자녀 사칭 | 지인사칭형 | 중 | 8 |
-| `investigation_unit` | 명의도용 조사 압박 | 수사기관사칭형 | 상 | 9 |
+| `family_emergency` | 폰 고장 자녀 사칭 | 지인사칭형 | 중 | 8 |
+| `investigation_unit` | 명의도용 수사 협조 압박 | 수사기관사칭형 | 상 | 9 |
 
 - `get_scenario(id)` — 모르는 id는 기본 시나리오로 폴백하되 **요청한 id는 유지**합니다.
   `CALL_SCENARIO`가 아직 플레이북이 없는 훈련 유형을 가리켜도 통화가 깨지지 않게 하려는 처리입니다.
@@ -96,62 +100,32 @@ Scenario.system_prompt = SAFETY_RULES + _STYLE_RULES + 시나리오 블록 + 퓨
 - `voice_phishing_training`은 구 id입니다. `_ALIASES`가 `bank_security_hold`로 넘겨
   기존 배포의 `CALL_SCENARIO` 설정이 그대로 동작합니다.
 
-> **고정 라이브러리는 최종 형태가 아닙니다.** 통화 시작 전 LLM 왕복을 0회로 만들기 위한
-> 현 단계의 기본값이고, 목표는 §1.3의 동적 생성을 상시 경로로 두어 **매 통화마다 AI가
-> 새로 쓴 시나리오**로 훈련하는 것입니다. 같은 훈련자가 두 번째 전화에서 아는 대본을
-> 만나면 훈련의 의미가 크게 줄기 때문입니다. 다섯 편은 그때까지의 안전판이자
-> 생성 품질을 비교할 기준선입니다.
+> **통화마다 시나리오를 새로 만들지 않습니다(2026-09-24 결정).** 예전에는 통화 직전에 LLM이
+> 시나리오를 쓰는 동적 생성(`generator.py`)이 있었지만 삭제했습니다.
+>
+> - 대본 모드는 대사가 통화 전에 정해져 있어야 미리 합성·즉시 재생할 수 있습니다.
+>   직전에 생성된 시나리오에는 대사도 음성도 없어서 모든 턴이 다시 LLM으로 갑니다.
+> - 생성+검수 왕복(최대 6회)이 곧 전화가 울리기 전의 대기였습니다.
+> - 사람이 검토하고 테스트가 금지어를 검사한 대사만 통화에 나가야 합니다.
+>
+> 같은 대본을 두 번 만나는 문제는 **시나리오 편수와 변형 대사를 늘려서** 풉니다.
+> LLM은 통화 때가 아니라 새 플레이북 초안을 쓸 때 쓰고, 사람이 다듬어 `library.py`에 넣습니다.
 
-### 1.3 동적 생성 — 지향하는 형태
+### 1.3 대본 모드와 하네스
 
-`DYNAMIC_SCENARIO=true`면 통화 전에 `generator.py`가 시나리오를 새로 씁니다.
-
-```
-generate_scenario(base)
-  └ 최대 3회(MAX_GENERATE_ATTEMPTS) 반복:
-      ① 생성 호출        → JSON
-      ② Pydantic 검증    GeneratedScenario (turn_plan 4–8, tactics 1–5,
-                          red_flags 1–8, max_turns 4–12, difficulty 하/중/상)
-      ③ _validate_safe_text()    실명 기관 · 메타 표현 · 재사용 가능 토큰 차단
-      ④ _validate_structure()    turn_plan ≤ max_turns, 훈련자 상호작용 단계 존재
-      ⑤ 검수 호출        → ScenarioReview
-      ⑥ valid && score ≥ 80 이면 반환, 아니면 실패 사유를 repair_hint로 되먹여 재시도
-```
-
-즉 한 시도당 **왕복 2회**, 최악의 경우 6회입니다. 기본값이 꺼져 있는 이유는 설계 판단이
-아니라 **비용과 지연** 때문입니다. 첫 토큰까지 수 초가 걸리는 모델에서는 이 왕복이 곧
-발신 전 대기이고, `SCENARIO_GENERATION_TIMEOUT_SEC`(기본 20초)에 걸리면 그 시간을 다 쓰고
-폴백합니다. 응답이 빠른 모델에서는 같은 왕복이 초 단위로 끝나므로 제약이 사라집니다.
-
-검수를 통과하지 못한 시나리오는 **절대 반환되지 않습니다.** 3회 모두 실패하면 예외를 던지고,
-`call_service.get_runtime_scenario()`가 고정 시나리오로 폴백합니다.
-
-> 동적 생성 시나리오에는 `quick_replies`와 `hangup_line`이 없습니다. 사건이 매번 달라져
-> 고정 문장이 대화와 어긋날 수 있기 때문이고, 그래서 즉답 경로 없이 모든 턴이 LLM으로 갑니다.
+- 대본 모드(`CALL_SCRIPT_MODE`): [`../docs/script-mode.md`](../docs/script-mode.md)
+- 통화 하네스(문장 가드·통화 모니터): [`../docs/harness.md`](../docs/harness.md)
 
 ### 1.4 모델은 교체 가능한 부품
 
-생성·검수·통화 중 응답 모델을 각각 독립적으로 지정합니다. 더 빠르거나 표현력이 좋은
-모델을 넣으면 코드 변경 없이 반영되고, 시나리오의 밀도와 대사의 자연스러움은
-대체로 이 선택을 따라갑니다.
-
-| 역할 | 환경변수 | 영향 |
-| --- | --- | --- |
-| 시나리오 생성 | `SCENARIO_LLM_PROVIDER` · `SCENARIO_GENERATOR_MODEL` | 사건 설정·압박 기법·퓨샷 대사의 밀도 |
-| 시나리오 검수 | `SCENARIO_REVIEW_MODEL` | 안전 위반·개연성 결함 탐지율 |
-| 통화 중 응답 | `CALL_LLM_PROVIDER` · `OPENAI_MODEL` / `GEMINI_MODEL` | 턴당 지연, 대사의 자연스러움 |
-
-두 공급자를 한 코드로 다룰 수 있는 것은 Gemini가 OpenAI 호환 엔드포인트를 제공하기
-때문입니다(`config.GEMINI_OPENAI_BASE_URL`). 같은 `AsyncOpenAI` 클라이언트에 `base_url`만
-바꿔 끼우고, `response_format={"type": "json_object"}`도 양쪽에서 동작합니다.
-
-`_resolve_model()`에 편의 장치가 하나 있습니다. `SCENARIO_LLM_PROVIDER=gemini`인데
-`SCENARIO_GENERATOR_MODEL`이 `gpt-*`로 남아 있으면 404 대신 Gemini 기본 모델로 대체하고
-경고를 남깁니다. 공급자를 바꿀 때마다 모델 변수 두 개를 같이 고치지 않아도 되게 한 처리입니다.
+통화 중 응답 모델은 `CALL_LLM_PROVIDER` · `OPENAI_MODEL` / `GEMINI_MODEL`로 지정합니다.
+두 키가 모두 있으면 1순위가 첫 토큰 전에 실패할 때 다른 쪽이 그 턴을 대신 답합니다.
+리포트 생성은 Gemini의 OpenAI 호환 엔드포인트(`config.GEMINI_OPENAI_BASE_URL`)로
+같은 `AsyncOpenAI` 클라이언트를 씁니다.
 
 > **주의: 숨은 추론 토큰이 켜진 모델은 피해야 합니다.** 추론 토큰은 첫 가시 토큰보다
-> 먼저 소모되므로 전화에서는 그대로 무음이 되고, 시나리오 생성에서도 타임아웃을 넘깁니다.
-> 측정 결과 비-lite 계열 flash 모델은 28–85초가 걸리고 본문이 비어 오는 경우도 있었습니다.
+> 먼저 소모되므로 전화에서는 그대로 무음이 됩니다. 측정 결과 비-lite 계열 flash 모델은
+> 28–85초가 걸리고 본문이 비어 오는 경우도 있었습니다.
 
 ---
 
@@ -162,12 +136,8 @@ AI가 사기범을 연기하되 **실제 범죄에 재사용 가능한 산출물
 | 계층 | 위치 | 차단 대상 |
 | --- | --- | --- |
 | 프롬프트 규칙 | `safety.SAFETY_RULES` | 실명 기관 사칭, 계좌·카드·주민번호·인증번호 발화, 전화번호·URL·앱 패키지명, AI/훈련임을 밝히는 것 |
-| 출력 후처리 | `safety.sanitize_spoken_text()` | 6자리 이상 연속 숫자, URL, 전화번호 패턴을 "안내 번호 / 주소"로 치환 |
-| 생성 검증 | `generator._validate_safe_text()` | `_REAL_ORGS`(실명 기관 40여 개) · `_SPOKEN_META`(AI·모델·프롬프트·훈련·시뮬레이션) · `_UNSAFE_TOKEN`(URL·6자리 숫자) |
-
-`_validate_safe_text()`는 **시스템 프롬프트에 들어갈 수 있는 모든 필드**를 검사합니다.
-`opening_line`처럼 상담원이 실제로 말하는 필드뿐 아니라 `scenario_summary`,
-`conversation_goal`도 `_to_scenario()`가 프롬프트에 그대로 접어 넣기 때문에 같은 기준을 적용합니다.
+| 출력 후처리 | `harness.OutputGuard` (+ `safety.sanitize_spoken_text()`) | 실시간 LLM의 모든 문장: 역할 이탈·실명 기관·비밀정보 요구 차단, 숫자·URL 치환 |
+| 대사 검증 | `safety.REAL_ORGS` · `SPOKEN_META` · `UNSAFE_TOKEN` | 시나리오의 모든 필드와 대본 대사 (테스트에서 검사) |
 
 기관명은 전부 가상입니다. 훈련자가 실명 기관을 먼저 언급하더라도 그 기관 직원을 사칭하지
 않습니다. 실재 기관명은 **해당 기관과 협력하는 형태로만** 도입할 수 있는 항목으로 분류해
@@ -289,7 +259,8 @@ pip install -e .                    # pyproject.toml — test-stt, test-latency 
 python -m ai.test_stt               # 마이크 → Deepgram 스트리밍 확인 (음성 출력 없음)
 python -m ai.test_latency           # 타이핑 입력 모드
 python -m ai.test_latency --mic     # 마이크 입력 — 발화 종료 → 첫 TTS 바이트 측정
-python -m ai.scenario_demo          # 생성 시나리오 3회분을 눈으로 확인
+python -m ai.prerender --dry-run    # 미리 합성할 대사 목록 (--dry-run 빼면 실제 합성)
+python -m ai.script_eval --logs app.log   # 대본 모드 적중률
 ```
 
 `python -m ai`는 `test_latency`로 연결됩니다(`__main__.py`).
@@ -314,22 +285,22 @@ python -m ai.scenario_demo          # 생성 시나리오 3회분을 눈으로 �
 
 | 그룹 | 변수 | 기본값 |
 | --- | --- | --- |
-| 공급자 | `SCENARIO_LLM_PROVIDER` | `openai` |
-| | `SCENARIO_GENERATOR_MODEL` · `SCENARIO_REVIEW_MODEL` | 공급자 기본값 |
-| | `CALL_LLM_PROVIDER` | `openai` |
+| 공급자 | `CALL_LLM_PROVIDER` | `openai` |
 | | `OPENAI_MODEL` / `GEMINI_MODEL` | `gpt-4o-mini` / `gemini-3.5-flash-lite` |
 | STT | `DEEPGRAM_MODEL` · `DEEPGRAM_LANGUAGE` | `nova-2` · `ko` |
 | | `STT_SAMPLE_RATE` | `16000` |
-| | `STT_ENDPOINTING_MS` | `400` — **체감 지연의 실질적 하한** |
+| | `STT_ENDPOINTING_MS` | `300` — **체감 지연의 실질적 하한** |
 | | `STT_UTTERANCE_END_MS` | `1000` — `speech_final`이 안 올 때의 백스톱 |
 | TTS | `ELEVENLABS_MODEL_ID` | `eleven_flash_v2_5` |
 | | `ELEVENLABS_VOICE_ID` | 비우면 시나리오별 배정 사용 |
 | | `ELEVENLABS_OUTPUT_FORMAT` · `_SAMPLE_RATE` | `pcm_24000` · `24000` |
-| 시나리오 | `DYNAMIC_SCENARIO` | `false` — **`true`가 목표 형태** |
-| | `CALL_SCENARIO` | 비우면 매 통화 무작위 선택 |
+| 시나리오 | `CALL_SCENARIO` | 비우면 매 통화 무작위 선택 |
+| 대본 모드 | `CALL_SCRIPT_MODE` | `shadow` (`off` / `shadow` / `on`) |
+| | `CALL_PRERENDER` · `TTS_CACHE_DIR` · `ELEVENLABS_PRERENDER_MODEL_ID` | `true` · 임시 폴더 · 실시간 모델과 같게 |
+| 하네스 | `CALL_GUARD_MAX_VIOLATIONS` · `CALL_MAX_SENTENCES` | `3` · `3` |
 
 `STT_ENDPOINTING_MS`가 진짜 손잡이입니다. 정상 흐름에서 발화는 `speech_final`로 마감되므로
-400 → 300은 매 턴 약 100ms, 250까지 내리면 150ms가 산술적으로 그대로 줄어듭니다.
+400 → 300(현재 기본값)은 매 턴 약 100ms, 250까지 내리면 150ms가 산술적으로 그대로 줄어듭니다.
 다만 말이 느린 사람의 문장 중간을 끊을 수 있으니 **실제 훈련자 연령대로 시험한 뒤** 정하세요.
 
 ---
@@ -343,9 +314,11 @@ python -m ai.scenario_demo          # 생성 시나리오 3회분을 눈으로 �
    길이는 지시문보다 예시가 훨씬 잘 가르칩니다.
 5. `quick_replies`의 답은 **대화 어느 시점에 나와도 어색하지 않아야** 합니다.
 6. `tts_voice_id`는 `voices.WORKING_VOICE_IDS` 안에서 고릅니다.
-7. `tactics` / `red_flags` / `ideal_trainee_response`는 리포트 채점 기준으로 재사용되므로,
+7. `progression`(동의할 때마다 다음 줄)과 `script`(의도별 답변 2개씩)를 씁니다. **그대로 읽히는 대사**이므로 한 줄에 짧은 문장 한두 개만.
+8. `tactics` / `red_flags` / `ideal_trainee_response`는 리포트 채점 기준으로 재사용되므로,
    `red_flags`에는 `turn_plan`에서 **실제로 드러나는** 위험만 적습니다.
-8. `pytest backend/tests/test_scenario_library.py` — 안전 정규식 검사는 자동으로 확장됩니다.
+9. `pytest backend/tests/test_scenario_library.py backend/tests/test_script_mode.py` — 안전 정규식 검사는 자동으로 확장됩니다.
+10. `python -m ai.prerender --scenario <id>`로 대사를 미리 합성해 둡니다.
 
 세트 전체로는 사건 유형·기관 유형·말투·압박 방식이 겹치지 않게 하고 난이도를 고르게 둡니다.
 자세한 기준은 [`scenarios/scenario_generation_guidelines.md`](scenarios/scenario_generation_guidelines.md)에 있습니다.
@@ -356,14 +329,12 @@ python -m ai.scenario_demo          # 생성 시나리오 3회분을 눈으로 �
 
 | 항목 | 내용 |
 | --- | --- |
-| **후처리 미적용** | 전화 경로는 통화 SDK의 문장 분할을 쓰므로 `sanitize_spoken_text()`를 거치지 않습니다. 실제 통화의 안전성은 프롬프트 규칙에만 의존합니다. |
-| **동적 생성 기본 비활성** | 목표 형태이지만 현재 모델의 생성 지연 때문에 꺼져 있습니다. 응답이 빠른 모델을 확보하면 켜는 것이 다음 단계입니다. |
+| **Realtime 폴백 경로** | Deepgram/ElevenLabs 키가 없어 음성-음성 모델로 떨어지면 텍스트를 가로챌 지점이 없어 하네스 2·3층이 적용되지 않습니다(프롬프트만). |
 | **`pick_scenario` 상태** | 중복 방지는 프로세스 메모리(`_last_picked_id`)에 있습니다. 워커가 여러 개면 각자 따로 셉니다. |
 | **설정 드리프트** | `.env.example`의 `ELEVENLABS_MODEL_ID`·`GEMINI_MODEL` 값이 코드 기본값 및 측정 결론과 어긋나 있습니다. 무음 통화를 유발할 수 있어 우선 정리 대상입니다. |
-| **`scenario_demo.py`** | 개발용 임시 스크립트입니다. 앱 구성 요소가 아니므로 언제든 지워도 됩니다. |
 
 ## 관련 문서
 
-- [`scenarios/scenario_generation_guidelines.md`](scenarios/scenario_generation_guidelines.md) — 시나리오 작성·생성 규칙
+- [`scenarios/scenario_generation_guidelines.md`](scenarios/scenario_generation_guidelines.md) — 시나리오 작성 규칙
 - [`../docs/latency.md`](../docs/latency.md) — 지연 측정 결과와 개선 이력
 - `../backend/app/training/` — 이 패키지를 전화 경로에 연결하는 어댑터

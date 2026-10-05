@@ -1,0 +1,39 @@
+# develop에 push될 때마다 Lightsail 서버에 SSH로 들어가 최신 develop을 받아 다시 빌드합니다.
+# 저장소 Settings → Secrets and variables → Actions에 아래 값을 등록해야 합니다.
+#   LIGHTSAIL_HOST     서버 고정 IP (예: 54.116.186.165)
+#   LIGHTSAIL_USER     SSH 사용자 (Ubuntu 이미지면 ubuntu)
+#   LIGHTSAIL_SSH_KEY  Lightsail에서 받은 SSH 개인 키(.pem) 내용 전체
+#   DEPLOY_PATH        서버에서 저장소를 받아 둔 경로 (예: /home/ubuntu/ai-challenge-Backend)
+name: Deploy to Lightsail
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+# 연달아 push되면 앞선 배포가 끝난 뒤 마지막 것만 이어서 돌립니다.
+concurrency:
+  group: lightsail-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USER }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_PATH }}"
+            git fetch origin develop
+            git checkout develop
+            git pull --ff-only origin develop
+            cd backend
+            docker compose -f compose.prod.yaml up -d --build
+            # 작은 인스턴스라 디스크가 금방 차므로 이전 빌드 이미지는 지웁니다.
+            docker image prune -f

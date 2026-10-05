@@ -9,7 +9,6 @@ from app.database import SessionLocal
 from app.models.call import Call
 from app.models.consent import Consent
 from app.models.participant import Participant
-from app.models.phone_verification import PhoneVerification
 from app.models.scheduled_training import ScheduledTraining
 from app.models.training_session import TrainingSession
 from app.models.transcript_event import TranscriptEvent
@@ -102,7 +101,13 @@ def update_call_status(
         return _to_response(session)
 
 
-def attach_call(session_id: str, call_id: str) -> SessionResponse | None:
+def attach_call(
+    session_id: str,
+    call_id: str,
+    *,
+    scenario_id: str | None = None,
+    agent_variant: str | None = None,
+) -> SessionResponse | None:
     with SessionLocal.begin() as db:
         session = db.scalar(_session_query(session_id))
         if session is None:
@@ -110,10 +115,22 @@ def attach_call(session_id: str, call_id: str) -> SessionResponse | None:
 
         call = db.scalar(select(Call).where(Call.clawops_call_id == call_id))
         if call is None:
-            db.add(Call(session_id=session_id, clawops_call_id=call_id, status="calling"))
+            db.add(
+                Call(
+                    session_id=session_id,
+                    clawops_call_id=call_id,
+                    status="calling",
+                    scenario_id=scenario_id,
+                    agent_variant=agent_variant,
+                )
+            )
         else:
             call.session_id = session_id
             call.status = "calling"
+            if scenario_id is not None:
+                call.scenario_id = scenario_id
+            if agent_variant is not None:
+                call.agent_variant = agent_variant
         session.call_status = "calling"
         if session.report_status is None:
             session.report_status = "pending"
@@ -164,10 +181,11 @@ def reset_sessions() -> None:
         db.execute(delete(Call))
         db.execute(delete(Consent))
         db.execute(delete(TrainingSession))
-        db.execute(delete(PhoneVerification))
         db.execute(delete(Participant))
+    from app.phone_verification_store import reset_signup_state
     from app.services.report_service import reset_reports
 
+    reset_signup_state()
     reset_reports()
 
 

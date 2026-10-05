@@ -51,7 +51,6 @@ def _configure_test_database() -> None:
 
     resolved_test_url = test_url.render_as_string(hide_password=False)
     os.environ["DATABASE_URL"] = resolved_test_url
-    os.environ.pop("DATABASE_PUBLIC_URL", None)
 
     backend_dir = Path(__file__).resolve().parents[1]
     alembic_config = Config(str(backend_dir / "alembic.ini"))
@@ -86,7 +85,7 @@ def _engine_is_bound_to_the_test_database() -> None:
         problems.append(
             f"engine is bound to {engine.url.host}/{engine.url.database}"
         )
-    live = os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL") or ""
+    live = os.getenv("DATABASE_URL") or ""
     if live and _target(make_url(live)) != _target(_TEST_URL):
         env_url = make_url(live)
         problems.append(f"DATABASE_URL now points at {env_url.host}/{env_url.database}")
@@ -97,3 +96,22 @@ def _engine_is_bound_to_the_test_database() -> None:
             + f". Expected {_TEST_URL.host}/{_TEST_URL.database}.",
             returncode=2,
         )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _signup_store_uses_a_fake_redis() -> None:
+    """Point the signup verification store at an in-process Redis.
+
+    The suite already builds a real Postgres database for itself, but a real
+    Redis would be one more service to have running before tests pass -- and
+    in CI, one more to declare. fakeredis implements the commands this store
+    uses (hashes with a TTL, SET NX, GETDEL), so the store is exercised as
+    written rather than mocked out.
+    """
+    import fakeredis
+
+    from app import phone_verification_store as store
+
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    store._client.cache_clear()
+    store._client = lambda: fake

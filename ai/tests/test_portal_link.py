@@ -1,5 +1,8 @@
 """통화 중 포털 링크 대본 회귀 테스트."""
 
+import re
+from pathlib import Path
+
 from ai.safety import REAL_ORGS, SPOKEN_META, UNSAFE_TOKEN
 from ai.scenarios import PLAYBOOKS, SCENARIOS
 from ai.scenarios.portal_link import PORTAL_EVENTS, PORTAL_LINKS, TERMINAL_EVENTS, link_for
@@ -26,6 +29,13 @@ def test_portal_matches_scenario_and_events():
         assert "가온형사사법지원포털" in playbook.incident
         assert link.send_after_seconds > 0
     assert set(TERMINAL_EVENTS) <= set(PORTAL_EVENTS)
+
+
+def test_events_match_backend():
+    # 백엔드를 import하지 않고 WEB_EVENT_TYPES 정의만 읽어 이름이 어긋나지 않게 한다
+    src = (Path(__file__).parents[2] / "backend/app/models/web_training.py").read_text(encoding="utf-8")
+    block = re.search(r"WEB_EVENT_TYPES = \((.*?)\n\)", src, re.S).group(1)
+    assert set(PORTAL_EVENTS) <= set(re.findall(r'"(\w+)"', block))
 
 
 def test_link_for():

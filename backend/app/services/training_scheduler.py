@@ -214,6 +214,7 @@ def _retry_or_fail(
     job.started_at = None
     if job.attempt_count >= _max_attempts():
         job.status = "failed"
+        _release_source_report(job, now=now)
         logger.error(
             "Unannounced training exhausted retries session=%s attempts=%s reason=%s",
             job.result_session_id,
@@ -230,6 +231,21 @@ def _retry_or_fail(
         job.scheduled_at.isoformat(),
         reason,
     )
+
+
+def _release_source_report(job: ScheduledTraining, *, now: datetime) -> None:
+    """Make the announced session's report final once its unannounced call gave up.
+
+    The source report stays "draft" while the unannounced call is pending, and
+    the dashboard treats a non-final session as in progress, so a job that
+    failed for good used to leave the participant unable to start a new
+    training. A report still being built ("pending") is left alone: it reads
+    the job status when it finishes and goes straight to final.
+    """
+    source = job.source_session
+    if source is not None and source.report_status == "draft":
+        source.report_status = "final"
+        source.updated_at = now
 
 
 def start_training_scheduler() -> None:

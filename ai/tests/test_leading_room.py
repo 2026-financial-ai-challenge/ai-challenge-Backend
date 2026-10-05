@@ -1,7 +1,7 @@
 """리딩방 대본 회귀 테스트."""
 
 from ai.safety import REAL_ORGS, SPOKEN_META, UNSAFE_TOKEN
-from ai.scenarios import SCENARIOS
+from ai.scenarios import PLAYBOOKS, SCENARIOS
 from ai.scenarios.leading_room import LEADING_ROOMS, ROOM_EVENTS, TERMINAL_EVENTS, room_for
 
 
@@ -26,6 +26,7 @@ def test_room_text_passes_safety_gates():
             assert not SPOKEN_META.search(text), text
         for action in room.actions:
             assert not REAL_ORGS.search(action.warning), action.warning
+            assert not UNSAFE_TOKEN.search(action.warning), action.warning
 
 
 def test_rooms_match_scenarios_and_events():
@@ -33,6 +34,10 @@ def test_rooms_match_scenarios_and_events():
         assert scenario_id in SCENARIOS
         assert room.scenario_id == scenario_id
         assert {a.event for a in room.actions} == set(TERMINAL_EVENTS)
+        # 문자는 '방금 통화드린' 사람이 보내므로 플레이북을 바꾸면 대본도 같이 바꿔야 한다
+        playbook = {p.id: p for p in PLAYBOOKS}[scenario_id]
+        assert playbook.persona_name in room.sms_body and playbook.persona_name in room.invite_text
+        assert playbook.organization.split()[0] in room.sms_body
     assert set(TERMINAL_EVENTS) <= set(ROOM_EVENTS)
 
 

@@ -64,7 +64,7 @@ def get_scenario(scenario_id: str) -> Scenario:
     without breaking the call.
     """
     requested = (scenario_id or "").strip() or DEFAULT_SCENARIO_ID
-    key = _ALIASES.get(requested, requested)
+    key = canonical_id(requested)
     scenario = SCENARIOS.get(key)
     if scenario is None:
         scenario = SCENARIOS[DEFAULT_SCENARIO_ID]

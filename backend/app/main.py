@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.errors import ApiError
-from app.routers import auth, call, consent, report, session, webhook
+from app.routers import auth, call, consent, report, session, web_training, webhook
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _REPO_DIR = Path(__file__).resolve().parents[2]
@@ -71,6 +71,7 @@ _ALLOWED_ORIGINS = (
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
     "https://safety-phishing-call.vercel.app",
+    "https://gaoncs.vercel.app",
 )
 # Vercel gives every preview deploy its own subdomain, so PR previews would
 # otherwise need a backend redeploy each time to be allowed through.
@@ -117,4 +118,5 @@ app.include_router(auth.router)
 app.include_router(session.router)
 app.include_router(call.router)
 app.include_router(report.router)
+app.include_router(web_training.router)
 app.include_router(webhook.router)

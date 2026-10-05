@@ -10,7 +10,12 @@ from app.errors import ApiError
 logger = logging.getLogger(__name__)
 
 
-def send_verification_code(phone_number: str, code: str) -> None:
+def send_sms(phone_number: str, body: str) -> str:
+    """ClawOps로 문자 한 통을 보내고 message_id를 반환한다.
+
+    Lightsail(서울 리전)에서 직접 호출한다 — 국외 리전용 중계는 쓰지 않는다.
+    설정 누락은 500(SMS_NOT_CONFIGURED), 발송 실패는 502(SMS_SEND_FAILED)로 올린다.
+    """
     api_key = os.getenv("CLAWOPS_API_KEY", "").strip()
     account_id = os.getenv("CLAWOPS_ACCOUNT_ID", "").strip()
     from_number = os.getenv("CLAWOPS_SMS_FROM", "").strip()
@@ -38,20 +43,28 @@ def send_verification_code(phone_number: str, code: str) -> None:
         message = client.messages.create(
             to=phone_number,
             from_=from_number,
-            body=f"[안심피싱] 회원가입 인증번호는 {code}입니다. 5분 안에 입력해 주세요.",
+            body=body,
         )
     except Exception:
         logger.exception("ClawOps SMS delivery request failed")
         raise ApiError(
             502,
             "SMS_SEND_FAILED",
-            "인증번호 발송에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+            "문자 발송에 실패했습니다. 잠시 후 다시 시도해 주세요.",
         ) from None
 
     logger.info(
-        "ClawOps verification SMS queued: message_id=%s phone=%s",
+        "ClawOps SMS queued: message_id=%s phone=%s",
         message.message_id,
         _mask_phone(phone_number),
+    )
+    return message.message_id
+
+
+def send_verification_code(phone_number: str, code: str) -> None:
+    send_sms(
+        phone_number,
+        f"[안심피싱] 회원가입 인증번호는 {code}입니다. 5분 안에 입력해 주세요.",
     )
 
 

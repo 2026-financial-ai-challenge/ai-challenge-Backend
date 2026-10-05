@@ -595,7 +595,7 @@ def _scenario_id_for_call(call_id: str) -> str | None:
 async def _dispatch_web_training_link(
     session_id: str, scenario_id: str | None
 ) -> None:
-    """통화가 정상 종료된 세션에 웹 훈련 링크를 문자로 보낸다.
+    """웹 훈련 링크를 문자로 보낸다(통화 중 타이머 또는 통화 종료 시).
 
     실제 수법("전화로 속인 뒤 문자로 유도")을 그대로 재현하는 단계. 가온 포털을
     쓰는 investigation_unit 시나리오에만 해당하며(판단은 발송기 쪽), 발송 실패가
@@ -609,6 +609,63 @@ async def _dispatch_web_training_link(
         logger.exception(
             "Web training link dispatch failed: session_id=%s", session_id
         )
+
+
+# Calls whose mid-call SMS timer is already set; ClawOps may repeat a status.
+_mid_call_link_calls: set[str] = set()
+
+
+def _mid_call_link_delay(scenario_id: str | None) -> int | None:
+    """Seconds after the call connects to text the link, or None for no link.
+
+    The agent says "I just texted you the link" partway into the call
+    (ai/scenarios/portal_link.py), so the SMS goes out on a timer from the
+    moment the call is answered rather than after hang-up.
+    MID_CALL_SMS_DELAY_SEC overrides the scenario's value.
+    """
+    if not scenario_id:
+        return None
+    ensure_ai_importable()
+    from ai.scenarios.portal_link import link_for
+
+    link = link_for(scenario_id)
+    if link is None:
+        return None
+    override = os.getenv("MID_CALL_SMS_DELAY_SEC", "").strip()
+    return max(0, int(override)) if override else link.send_after_seconds
+
+
+def _schedule_mid_call_link(call_id: str, session_id: str) -> None:
+    if call_id in _mid_call_link_calls:
+        return
+    scenario_id = _scenario_id_for_call(call_id)
+    try:
+        delay = _mid_call_link_delay(scenario_id)
+    except Exception:
+        logger.exception("Mid-call SMS delay lookup failed: call_id=%s", call_id)
+        return
+    if delay is None:
+        return
+    _mid_call_link_calls.add(call_id)
+
+    async def send_later() -> None:
+        try:
+            await asyncio.sleep(delay)
+            logger.info(
+                "Sending mid-call training link session=%s call_id=%s after=%ss",
+                session_id,
+                call_id,
+                delay,
+            )
+            # Sends once per session: the hang-up dispatch below finds the
+            # link and skips, and still covers a call that ends before this.
+            await _dispatch_web_training_link(session_id, scenario_id)
+        finally:
+            _mid_call_link_calls.discard(call_id)
+
+    task = asyncio.get_running_loop().create_task(send_later())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def handle_call_status_event(call_id: str) -> None:
@@ -635,6 +692,8 @@ async def handle_call_status_event(call_id: str) -> None:
 
     if status_name in _RINGING_STATUSES:
         update_call_status(session_id, "calling")
+        if status_name == "in-progress":
+            _schedule_mid_call_link(call_id, session_id)
         return
 
     if status_name == "completed":

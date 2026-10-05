@@ -4,8 +4,8 @@ investigation_unit 통화 중에 sms_body 뒤에 링크를 붙여 훈련자에�
 '방금 문자를 보냈다'로 맞춰져 있다. 훈련자가 링크에서 개인정보를 제출하면 프론트가 경고를 띄우고,
 백엔드가 같은 순간 통화도 끊는다(ends_call).
 
-현재 백엔드(web_training_service.py)는 이 모듈을 읽지 않고, 통화가 끝난 뒤에 자체 문구로 문자를 보내며
-통화는 끊지 않는다. 통화 중 발송(send_after_seconds)과 통화 종료를 백엔드에 추가해야 대사와 맞는다.
+백엔드(call_service.py)는 통화가 연결되면 send_after_seconds 뒤에 문자를 보낸다(통화가 그 전에 끝나면 종료 후).
+문구는 아직 web_training_service.py의 자체 문구를 쓰고, 위험 행동 때 통화를 끊는 것(ends_call)도 아직 없다.
 링크 경로와 이벤트 이름은 백엔드의 /t/{token}, WEB_EVENT_TYPES를 기준으로 한다(아래 값은 참고용).
 
 문장은 시나리오 문장과 같은 안전 기준을 지킨다(ai/tests/test_portal_link.py).

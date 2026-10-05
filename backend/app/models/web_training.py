@@ -26,6 +26,15 @@ WEB_EVENT_TYPES = (
     "left_without_input",     # 아무 정보도 넣지 않고 빠르게 이탈 (방어 행동)
 )
 
+# 이 중 하나라도 들어오면 링크를 닫는다. 이미 속은 뒤에 다른 기기에서 다시 열어
+# 훈련을 반복하는 것을 서버에서 막기 위해서다.
+WEB_RISK_EVENT_TYPES = (
+    "identity_submitted",
+    "case_lookup_submitted",
+    "financial_info_submitted",
+    "app_install_clicked",
+)
+
 
 class WebTrainingLink(Base):
     """세션마다 발급되는 1회성 훈련 링크.
@@ -43,6 +52,10 @@ class WebTrainingLink(Base):
         index=True,
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 위험 행동이 처음 기록된 시각. 값이 있으면 페이지를 다시 열 수 없다(410).
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

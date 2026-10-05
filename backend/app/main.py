@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -27,6 +28,25 @@ for _env_file in (
     load_dotenv(_env_file, override=False)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
 logging.getLogger("clawops.agent").setLevel(logging.INFO)
+
+
+_WEB_TRAINING_TOKEN_PATH = re.compile(r"^(/v1/web-training/)(?!sessions/)[^/?]+")
+
+
+class _MaskWebTrainingToken(logging.Filter):
+    """접근 로그에서 웹 훈련 링크 토큰을 가린다 — 토큰이 곧 접근 권한이다."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn 접근 로그 args: (client, method, path, http_version, status)
+        if isinstance(record.args, tuple) and len(record.args) >= 3:
+            path = record.args[2]
+            if isinstance(path, str):
+                masked = _WEB_TRAINING_TOKEN_PATH.sub(r"\1***", path)
+                record.args = record.args[:2] + (masked,) + record.args[3:]
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_MaskWebTrainingToken())
 logging.getLogger(__name__).info(
     "Signup SMS: ClawOps (%s) · call AI: PipelineSession (%s)",
     "configured"

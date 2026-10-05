@@ -206,3 +206,88 @@ def test_repeated_event_is_idempotent():
     ).json()
     # 60 - 25(금융정보), counted once
     assert report["webTraining"]["score"] == 35
+
+
+# ---- closing the link after a risky action -------------------------------
+
+
+def test_risky_event_closes_the_link_for_reopening():
+    client = _client()
+    session_id, _ = _authenticated_session()
+    token = create_link(session_id)
+
+    client.post(f"/v1/web-training/{token}/events", json={"eventType": "link_opened"})
+    assert client.get(f"/v1/web-training/{token}").status_code == 200
+
+    client.post(
+        f"/v1/web-training/{token}/events",
+        json={"eventType": "identity_submitted"},
+    )
+    # 다른 기기에서 다시 열어도 서버가 막는다.
+    reopened = client.get(f"/v1/web-training/{token}")
+    assert reopened.status_code == 410
+    assert reopened.json()["code"] == "WEB_LINK_CLOSED"
+
+
+def test_defensive_event_keeps_the_link_open():
+    client = _client()
+    session_id, _ = _authenticated_session()
+    token = create_link(session_id)
+
+    client.post(
+        f"/v1/web-training/{token}/events", json={"eventType": "report_clicked"}
+    )
+    assert client.get(f"/v1/web-training/{token}").status_code == 200
+
+
+def test_closed_link_still_accepts_events_from_the_open_page():
+    client = _client()
+    session_id, headers = _authenticated_session()
+    token = create_link(session_id)
+
+    client.post(
+        f"/v1/web-training/{token}/events",
+        json={"eventType": "financial_info_submitted"},
+    )
+    # 중복 위험 이벤트가 롤백돼도 닫힘은 유지된다.
+    client.post(
+        f"/v1/web-training/{token}/events",
+        json={"eventType": "financial_info_submitted"},
+    )
+    later = client.post(
+        f"/v1/web-training/{token}/events", json={"eventType": "report_clicked"}
+    )
+    assert later.status_code == 204
+    assert client.get(f"/v1/web-training/{token}").status_code == 410
+
+    report = client.get(
+        f"/v1/sessions/{session_id}/report", headers=headers
+    ).json()
+    # 60 - 25(금융정보) + 12(신고) = 47
+    assert report["webTraining"]["score"] == 47
+
+
+# ---- access log masking --------------------------------------------------
+
+
+def test_access_log_masks_the_link_token():
+    import logging
+
+    from app.main import _MaskWebTrainingToken
+
+    def masked(path: str) -> str:
+        record = logging.LogRecord(
+            "uvicorn.access", logging.INFO, "", 0,
+            '%s - "%s %s HTTP/%s" %d',
+            ("1.2.3.4:5", "GET", path, "1.1", 200), None,
+        )
+        _MaskWebTrainingToken().filter(record)
+        return record.args[2]
+
+    assert masked("/v1/web-training/abcDEF_123") == "/v1/web-training/***"
+    assert masked("/v1/web-training/abc/events") == "/v1/web-training/***/events"
+    assert (
+        masked("/v1/web-training/sessions/s1/link")
+        == "/v1/web-training/sessions/s1/link"
+    )
+    assert masked("/v1/sessions/s1/report") == "/v1/sessions/s1/report"

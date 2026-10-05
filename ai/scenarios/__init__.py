@@ -37,7 +37,12 @@ SCENARIOS: dict[str, Scenario] = {
 
 # Historical id used by CALL_SCENARIO and by the backend default. Kept so an
 # existing deployment keeps working without an env change.
-_ALIASES = {"voice_phishing_training": DEFAULT_SCENARIO_ID}
+_ALIASES = {
+    "voice_phishing_training": DEFAULT_SCENARIO_ID,
+    # 2026-10-05에 시나리오를 바꾸면서 id도 바꿨다. 예전 통화 기록과 배포 전 백엔드가 계속 찾을 수 있게 남긴다.
+    "delivery_payment_error": "ipo_allocation",
+    "family_emergency": "card_delivery",
+}
 
 # Which scenario the last pick_scenario() handed out, so back-to-back training
 # calls in one process do not repeat themselves.

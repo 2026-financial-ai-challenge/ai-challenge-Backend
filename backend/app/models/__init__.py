@@ -7,6 +7,7 @@ from app.models.training_session import TrainingSession
 from app.models.training_report import TrainingReportRecord
 from app.models.transcript_event import TranscriptEvent
 from app.models.transcript_turn import TranscriptTurnRecord
+from app.models.web_training import WebTrainingEvent, WebTrainingLink
 
 __all__ = [
     "Call",
@@ -18,4 +19,6 @@ __all__ = [
     "TrainingSession",
     "TranscriptEvent",
     "TranscriptTurnRecord",
+    "WebTrainingEvent",
+    "WebTrainingLink",
 ]

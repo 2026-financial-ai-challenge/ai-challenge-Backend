@@ -584,6 +584,33 @@ async def _start_managed_call(phone_number: str, from_number: str, scenario):
     return call, variant
 
 
+def _scenario_id_for_call(call_id: str) -> str | None:
+    """관리형 통화가 실제로 어떤 시나리오로 걸렸는지 (Call에 저장된 값)."""
+    with SessionLocal() as db:
+        return db.scalar(
+            select(Call.scenario_id).where(Call.clawops_call_id == call_id)
+        )
+
+
+async def _dispatch_web_training_link(
+    session_id: str, scenario_id: str | None
+) -> None:
+    """통화가 정상 종료된 세션에 웹 훈련 링크를 문자로 보낸다.
+
+    실제 수법("전화로 속인 뒤 문자로 유도")을 그대로 재현하는 단계. 가온 포털을
+    쓰는 investigation_unit 시나리오에만 해당하며(판단은 발송기 쪽), 발송 실패가
+    통화 처리를 막지 않도록 예외는 삼킨다. 세션당 한 번만 나간다.
+    """
+    try:
+        from app.services.web_training_service import dispatch_training_link
+
+        await dispatch_training_link(session_id, scenario_id)
+    except Exception:
+        logger.exception(
+            "Web training link dispatch failed: session_id=%s", session_id
+        )
+
+
 async def handle_call_status_event(call_id: str) -> None:
     """Managed-mode replacement for _monitor_call.
 
@@ -632,6 +659,9 @@ async def handle_call_status_event(call_id: str) -> None:
                 "ClawOps transcript request failed: session_id=%s",
                 session_id,
             )
+        await _dispatch_web_training_link(
+            session_id, _scenario_id_for_call(call_id)
+        )
         return
 
     if status_name in _MISSED_STATUSES:
@@ -843,6 +873,9 @@ async def _monitor_call(session_id: str, agent, call_session, scenario=None) -> 
                     "ClawOps transcript request failed: session_id=%s",
                     session_id,
                 )
+            await _dispatch_web_training_link(
+                session_id, getattr(scenario, "id", None)
+            )
         elif call_had_transcript(session_id, call_session.call_id):
             update_call_status(session_id, "silent")
             _complete_call(call_session.call_id)

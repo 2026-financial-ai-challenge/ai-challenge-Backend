@@ -20,6 +20,15 @@ class TrainingReport(BaseModel):
     source: Literal["live", "clawops", "comparison"]
 
 
+class WebTrainingReport(BaseModel):
+    """웹 훈련(피싱 사이트 모사) 결과. 전화 점수와 같은 0~100 척도."""
+
+    score: int = Field(ge=0, le=100)
+    events: list[str] = Field(default_factory=list)
+    riskBehaviors: list[BehaviorItem] = Field(default_factory=list)
+    defenseBehaviors: list[BehaviorItem] = Field(default_factory=list)
+
+
 class TranscriptTurn(BaseModel):
     role: Literal["user", "assistant"]
     text: str
@@ -36,3 +45,4 @@ class GetReportResponse(BaseModel):
     unannounced: TrainingReport | None = None
     final: TrainingReport | None = None
     clawopsSummary: dict[str, Any] | None = None
+    webTraining: WebTrainingReport | None = None

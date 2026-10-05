@@ -181,38 +181,43 @@ _ABANDONED_JOB_STATUSES = ("failed", "cancelled")
 def get_report(session_id: str) -> GetReportResponse:
     with SessionLocal() as db:
         call = _latest_call(db, session_id)
-        draft_turn_rows = db.scalars(
-            select(TranscriptTurnRecord)
-            .where(
-                TranscriptTurnRecord.session_id == session_id,
-                TranscriptTurnRecord.source == "live",
-            )
-            .order_by(TranscriptTurnRecord.sequence)
-        ).all()
-        turns = draft_turn_rows
         reports = db.scalars(
             select(TrainingReportRecord).where(
                 TrainingReportRecord.session_id == session_id
             )
         ).all()
-        draft_row = next((row for row in reports if row.source == "live"), None)
-        final_row = next((row for row in reports if row.source == "clawops"), None)
+        live_row = next((row for row in reports if row.source == "live"), None)
+        clawops_row = next((row for row in reports if row.source == "clawops"), None)
+        # The announced call's own result: the recording-based report when there
+        # is one, else the live draft. Managed calls never write a live report, so
+        # reading only "live" here hid the whole first call.
+        announced_row = clawops_row or live_row
+        announced_turn_rows = _turn_rows(
+            db, session_id, "clawops" if clawops_row is not None else "live"
+        ) or _turn_rows(db, session_id, "live")
+        turns = announced_turn_rows
         unannounced_row = None
         unannounced_turn_rows: list[TranscriptTurnRecord] = []
+        # Each round shows three reports: the first call, the unannounced call,
+        # and the comparison of the two. The comparison only exists when both
+        # calls produced a report; a missing one is shown as "not created".
+        final_report: TrainingReport | None = None
 
         # The unannounced call runs in its own session so retries and call records
         # stay independent. For the user-facing report, however, it is the final
         # result of the original announced-training session.
         # A job that gave up (failed/cancelled) has no unannounced result to wait
-        # for, so the announced call's own report is the final one.
+        # for, so the round ends with the announced call alone.
         scheduled = db.scalar(
             select(ScheduledTraining).where(
                 ScheduledTraining.source_session_id == session_id,
                 ScheduledTraining.status.not_in(_ABANDONED_JOB_STATUSES),
             )
         )
-        if scheduled is not None:
-            final_row = None
+        if scheduled is None:
+            # A live draft alone still waits for the recording-based report.
+            round_done = clawops_row is not None
+        else:
             if scheduled.result_session_id:
                 result_reports = db.scalars(
                     select(TrainingReportRecord).where(
@@ -229,27 +234,16 @@ def get_report(session_id: str) -> GetReportResponse:
                 )
                 if unannounced_row is not None:
                     result_call = _latest_call(db, scheduled.result_session_id)
-                    unannounced_turn_rows = db.scalars(
-                        select(TranscriptTurnRecord)
-                        .where(
-                            TranscriptTurnRecord.session_id
-                            == scheduled.result_session_id,
-                            TranscriptTurnRecord.source
-                            == (
-                                "clawops"
-                                if unannounced_row.source == "clawops"
-                                else "live"
-                            ),
-                        )
-                        .order_by(TranscriptTurnRecord.sequence)
-                    ).all()
+                    unannounced_turn_rows = _turn_rows(
+                        db, scheduled.result_session_id, unannounced_row.source
+                    )
                     call = result_call or call
                     turns = unannounced_turn_rows
-                    if draft_row is not None:
-                        final_row = _combine_reports(
-                            _report_schema(draft_row),
-                            _report_schema(unannounced_row),
-                        )
+                    final_report = _combine_reports(
+                        _report_schema(announced_row),
+                        _report_schema(unannounced_row),
+                    )
+            round_done = unannounced_row is not None or scheduled.status == "completed"
         web_event_types = db.scalars(
             select(WebTrainingEvent.event_type)
             .where(WebTrainingEvent.session_id == session_id)
@@ -261,9 +255,9 @@ def get_report(session_id: str) -> GetReportResponse:
 
         status: ReportStatus = (
             "final"
-            if final_row is not None
+            if round_done
             else "draft"
-            if draft_row is not None
+            if announced_row is not None
             else "pending"
             if call is not None or turns
             else "none"
@@ -273,24 +267,29 @@ def get_report(session_id: str) -> GetReportResponse:
             callId=call.clawops_call_id if call is not None else None,
             status=status,
             turns=[TranscriptTurn(role=row.role, text=row.text) for row in turns],
-            draftTurns=_turn_schemas(draft_turn_rows),
+            draftTurns=_turn_schemas(announced_turn_rows),
             unannouncedTurns=_turn_schemas(unannounced_turn_rows),
-            draft=_report_schema(draft_row),
+            draft=_report_schema(announced_row),
             unannounced=_report_schema(unannounced_row),
-            final=(
-                final_row
-                if isinstance(final_row, TrainingReport)
-                else _report_schema(final_row)
-            ),
-            clawopsSummary=(
-                unannounced_row.clawops_summary
-                if unannounced_row is not None
-                else final_row.clawops_summary
-                if isinstance(final_row, TrainingReportRecord)
-                else None
-            ),
+            final=final_report,
+            clawopsSummary=(unannounced_row or announced_row).clawops_summary
+            if (unannounced_row or announced_row) is not None
+            else None,
             webTraining=web_training,
         )
+
+
+def _turn_rows(db, session_id: str, source: str) -> list[TranscriptTurnRecord]:
+    return list(
+        db.scalars(
+            select(TranscriptTurnRecord)
+            .where(
+                TranscriptTurnRecord.session_id == session_id,
+                TranscriptTurnRecord.source == source,
+            )
+            .order_by(TranscriptTurnRecord.sequence)
+        ).all()
+    )
 
 
 def format_live_turns(turns: list[TranscriptTurn]) -> str:
@@ -453,7 +452,7 @@ async def build_draft_report(
         transcript, source="live", client=client, scenario=scenario
     )
     _save_report(session_id, report, status="draft")
-    status: ReportStatus = "final" if get_report(session_id).final is not None else "draft"
+    status: ReportStatus = "final" if get_report(session_id).status == "final" else "draft"
     update_report_status(session_id, status)
     _mark_source_report_ready(session_id)
     logger.info("Draft report ready session=%s turns=%s", session_id, len(turns))

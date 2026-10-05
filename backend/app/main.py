@@ -14,7 +14,7 @@ from app.routers import auth, call, consent, report, session, webhook
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _REPO_DIR = Path(__file__).resolve().parents[2]
 # Never override: a value already in the environment was put there
-# deliberately -- by Railway, by compose's env_file, or by a test run that
+# deliberately -- by compose's env_file, or by a test run that
 # just pointed us at a scratch database -- and this file carries the deployed
 # DATABASE_URL, so overriding used to be able to hand a test suite the real
 # one. Precedence between the two files is unchanged: backend/.env is loaded

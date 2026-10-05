@@ -51,6 +51,30 @@ docker compose up --build
 
 ## 배포
 
-`start.sh`가 컨테이너 시작 시 `alembic upgrade head`를 최대 10회 재시도한 뒤 `uvicorn`을 기동합니다. 배포 환경(Railway 등)에는 `DATABASE_URL` 또는 `DATABASE_PUBLIC_URL` 환경변수가 반드시 설정되어 있어야 하며, 값이 비어있으면 마이그레이션이 반복 실패합니다.
+AWS Lightsail **서울** 리전의 Ubuntu 서버 한 대에 `compose.prod.yaml`로 올립니다. ClawOps가 국외 IP의 문자 발송을 거부하므로 리전은 반드시 한국이어야 합니다.
+
+`compose.prod.yaml`은 개발용 `compose.yaml`과 달리 코드 리로드가 없고, DB·Redis 포트를 밖으로 열지 않으며, Caddy가 HTTPS를 맡습니다. `DATABASE_URL`·`REDIS_URL`은 compose가 채우므로 `.env`에 넣지 않습니다.
+
+1. Lightsail 방화벽에서 22·80·443을 열고 고정 IP를 연결합니다. 도메인은 IP의 점을 하이픈으로 바꾼 `<IP>.sslip.io`를 씁니다.
+2. 서버에 Docker를 설치하고 저장소를 받습니다.
+3. `backend/.env`를 만들고, `.env.example` 항목에 더해 아래를 채웁니다.
+
+   ```env
+   DOMAIN=54-116-186-165.sslip.io
+   PUBLIC_BASE_URL=https://54-116-186-165.sslip.io
+   LOCAL_DB_PASSWORD=<openssl rand -hex 16>
+   ```
+
+4. 실행합니다. 업데이트할 때도 같은 명령을 씁니다.
+
+   ```bash
+   git pull && docker compose -f compose.prod.yaml up -d --build
+   ```
+
+처음 한 번은 직접 실행하고, 이후에는 `develop`에 push될 때마다 GitHub Actions([`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml))가 서버에 SSH로 들어가 같은 명령을 실행합니다. 저장소 Secrets에 `LIGHTSAIL_HOST`·`LIGHTSAIL_USER`·`LIGHTSAIL_SSH_KEY`·`DEPLOY_PATH`를 등록해야 하고, 서버의 저장소는 `develop` 브랜치를 받아 두어야 합니다.
+
+`start.sh`가 컨테이너 시작 시 `alembic upgrade head`를 최대 10회 재시도한 뒤 `uvicorn`을 기동합니다.
+
+배포 후 ClawOps 콘솔의 전사 웹훅은 `https://<DOMAIN>/v1/webhooks/clawops/transcript`로, 프론트엔드(Vercel)의 `NEXT_PUBLIC_API_BASE_URL`은 `https://<DOMAIN>`으로 맞춥니다.
 
 환경변수 전체 목록과 설명은 [`.env.example`](.env.example)을 참고하세요.

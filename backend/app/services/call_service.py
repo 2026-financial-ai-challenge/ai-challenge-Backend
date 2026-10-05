@@ -765,7 +765,7 @@ async def _create_outbound_call(session_id: str):
 
     try:
         # Instant: a fixed playbook is picked in process.
-        scenario = await get_runtime_scenario()
+        scenario = await get_runtime_scenario(session.currentTrainingType)
     except Exception:
         logger.exception("Scenario selection failed; using the default scenario")
         try:

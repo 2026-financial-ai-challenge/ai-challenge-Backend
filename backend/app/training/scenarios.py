@@ -29,18 +29,26 @@ def get_call_scenario():
     return get_scenario(os.getenv("CALL_SCENARIO", "voice_phishing_training"))
 
 
-async def get_runtime_scenario():
+async def get_runtime_scenario(training_type: str | None = None):
     """Pick the scenario for one outbound training call.
 
     Always a fixed playbook from ai/scenarios/library.py, chosen at random so
     consecutive calls differ, with no LLM round trip. Pinning CALL_SCENARIO to
-    one id disables the rotation.
+    one id disables the rotation. ANNOUNCED_CALL_SCENARIO pins only the first
+    (announced) call, e.g. to test the investigation_unit SMS every time while
+    the unannounced call keeps rotating.
 
     There is deliberately no per-call generation: the script mode speaks
     pre-written lines that are synthesized before the call, and a scenario
     written seconds before dialing has neither the lines nor the audio.
     """
     ensure_ai_importable()
+    announced_pin = os.getenv("ANNOUNCED_CALL_SCENARIO", "").strip()
+    if training_type == "announced" and announced_pin:
+        from ai.scenarios import get_scenario
+
+        return get_scenario(announced_pin)
+
     pinned = os.getenv("CALL_SCENARIO", "").strip()
     if pinned:
         return get_call_scenario()

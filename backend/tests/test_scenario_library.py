@@ -144,6 +144,17 @@ def test_pinned_scenario_disables_rotation(monkeypatch):
     assert scenario.id == get_call_scenario().id
 
 
+def test_announced_pin_applies_to_the_first_call_only(monkeypatch):
+    monkeypatch.delenv("CALL_SCENARIO", raising=False)
+    monkeypatch.setenv("ANNOUNCED_CALL_SCENARIO", "investigation_unit")
+
+    announced = [asyncio.run(get_runtime_scenario("announced")).id for _ in range(10)]
+    unannounced = {asyncio.run(get_runtime_scenario("unannounced")).id for _ in range(20)}
+
+    assert set(announced) == {"investigation_unit"}
+    assert len(unannounced) >= 2
+
+
 @pytest.mark.parametrize(
     ("utterance", "trigger"),
     [

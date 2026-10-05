@@ -411,6 +411,7 @@ def _main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_sync = sub.add_parser("sync", help="create/update the agents")
+    # --variant가 없으면 지금 통화에 쓰는 external_tts만 만듭니다(live는 쓸 때 직접 지정)
     p_sync.add_argument("--variant", action="append", choices=VARIANTS)
     p_sync.add_argument("--scenario", action="append", choices=sorted(SCENARIOS))
     p_sync.add_argument("--dry-run", action="store_true")
@@ -437,7 +438,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "sync":
         rest = None if args.dry_run else ClawOpsREST()
-        mapping = sync_agents(rest=rest, variants=tuple(args.variant or VARIANTS),
+        mapping = sync_agents(rest=rest, variants=tuple(args.variant or ("external_tts",)),
                               scenario_ids=args.scenario, dry_run=args.dry_run)
         print(json.dumps(mapping, ensure_ascii=False, indent=2))
         return 0

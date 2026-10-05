@@ -56,6 +56,9 @@ services:
       POSTGRES_DB: safety_phishing_call
       POSTGRES_USER: safety_phishing_user
       POSTGRES_PASSWORD: "${LOCAL_DB_PASSWORD:?LOCAL_DB_PASSWORD must be set}"
+    # 서버 자신(127.0.0.1)에게만 엽니다. DBeaver 등은 SSH 터널로 들어옵니다.
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

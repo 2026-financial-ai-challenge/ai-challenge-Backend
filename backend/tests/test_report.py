@@ -378,8 +378,10 @@ def test_draft_then_final_report(monkeypatch):
     assert final.source == "clawops"
     stored = get_report(session_id)
     assert stored.status == "final"
-    assert stored.draft is not None
-    assert stored.final is not None
+    # The recording-based report replaces the live draft as the first-call
+    # result; with no unannounced call there is nothing to compare.
+    assert stored.draft is not None and stored.draft.source == "clawops"
+    assert stored.final is None
     assert stored.clawopsSummary == {"topic": "account alert"}
 
 
@@ -502,6 +504,120 @@ def test_unannounced_report_becomes_source_session_final(monkeypatch):
         assert source.report_status == "final"
 
 
+def _clawops_report(monkeypatch, session_id, call_id, segments, summary):
+    """Build the recording-based report the way a managed call does: no live draft."""
+    bind_call(session_id, call_id)
+    monkeypatch.setattr(
+        report_service,
+        "fetch_clawops_transcript",
+        lambda _call_id: SimpleNamespace(
+            status="completed",
+            segments=[
+                SimpleNamespace(speaker=speaker, text=text)
+                for speaker, text in segments
+            ],
+        ),
+    )
+    monkeypatch.setattr(report_service, "fetch_clawops_summary", lambda _call_id: None)
+    asyncio.run(
+        build_final_report(
+            session_id, call_id, client=_fake_openai(_llm_payload(summary=summary))
+        )
+    )
+
+
+def test_managed_call_report_carries_its_recorded_turns(monkeypatch):
+    session_id = _session_id()
+    _clawops_report(
+        monkeypatch,
+        session_id,
+        "CAmanaged",
+        [("AGENT", "성함 확인합니다"), ("CUSTOMER", "김민수입니다. 끊겠습니다.")],
+        "녹음 기준 요약",
+    )
+
+    stored = get_report(session_id)
+
+    assert stored.status == "final"
+    assert stored.draft is not None and stored.draft.summary == "녹음 기준 요약"
+    assert stored.unannounced is None
+    assert stored.final is None
+    assert [turn.text for turn in stored.turns] == [
+        "성함 확인합니다",
+        "김민수입니다. 끊겠습니다.",
+    ]
+    assert len(stored.draftTurns) == 2
+
+
+def test_managed_calls_compare_first_and_unannounced_reports(monkeypatch):
+    """Both calls only have recording-based reports, as every managed call does."""
+    source_session_id, _headers = _authenticated_session()
+    _clawops_report(
+        monkeypatch,
+        source_session_id,
+        "CAfirst",
+        [("AGENT", "검찰청입니다"), ("CUSTOMER", "김민수입니다")],
+        "첫 번째 통화 결과",
+    )
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    schedule_unannounced_training(source_session_id, now=now, delay_seconds=1800)
+
+    waiting = get_report(source_session_id)
+    assert waiting.status == "draft"
+    assert waiting.draft is not None and waiting.draft.summary == "첫 번째 통화 결과"
+    assert waiting.final is None
+    assert [turn.text for turn in waiting.draftTurns] == ["검찰청입니다", "김민수입니다"]
+
+    monkeypatch.setenv("CLAWOPS_UNANNOUNCED_PHONE_NUMBER", "07011112222")
+    monkeypatch.setattr(call_service, "start_training_calls", lambda *_args: None)
+    process_due_scheduled_trainings(now=now + timedelta(minutes=31))
+    with SessionLocal() as db:
+        result_session_id = db.scalar(select(ScheduledTraining)).result_session_id
+    _clawops_report(
+        monkeypatch,
+        result_session_id,
+        "CAsecond",
+        [("AGENT", "택배 기사입니다"), ("CUSTOMER", "공식 번호로 확인할게요")],
+        "불시 전화 결과",
+    )
+
+    combined = get_report(source_session_id)
+    assert combined.status == "final"
+    assert combined.callId == "CAsecond"
+    assert combined.draft is not None and combined.draft.summary == "첫 번째 통화 결과"
+    assert combined.unannounced is not None
+    assert combined.unannounced.summary == "불시 전화 결과"
+    assert combined.final is not None and combined.final.source == "comparison"
+    assert [turn.text for turn in combined.draftTurns] == ["검찰청입니다", "김민수입니다"]
+    assert [turn.text for turn in combined.unannouncedTurns] == [
+        "택배 기사입니다",
+        "공식 번호로 확인할게요",
+    ]
+
+
+def test_failed_unannounced_call_leaves_first_report_and_no_comparison(monkeypatch):
+    source_session_id, _headers = _authenticated_session()
+    _clawops_report(
+        monkeypatch,
+        source_session_id,
+        "CAonly",
+        [("AGENT", "검찰청입니다"), ("CUSTOMER", "누구세요")],
+        "첫 번째 통화 결과",
+    )
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    schedule_unannounced_training(source_session_id, now=now, delay_seconds=1800)
+    with SessionLocal.begin() as db:
+        db.scalar(select(ScheduledTraining)).status = "failed"
+
+    stored = get_report(source_session_id)
+
+    assert stored.status == "final"
+    assert stored.draft is not None and stored.draft.summary == "첫 번째 통화 결과"
+    assert stored.unannounced is None
+    assert stored.final is None
+    assert [turn.text for turn in stored.draftTurns] == ["검찰청입니다", "누구세요"]
+
+
 def test_get_report_api_none_then_draft(monkeypatch):
     client = _client()
     session_id, headers = _authenticated_session()
@@ -586,7 +702,7 @@ def test_transcript_webhook_builds_final(monkeypatch):
     assert response.status_code == 204
     body = client.get(f"/v1/sessions/{session_id}/report", headers=headers).json()
     assert body["status"] == "final"
-    assert body["final"]["source"] == "clawops"
+    assert body["draft"]["source"] == "clawops"
 
 
 def test_register_transcript_listener_stores_turns():

@@ -252,8 +252,9 @@ def agent_payload(playbook: Playbook, variant: str) -> dict[str, Any]:
             # 기본값. 0.6에서는 짧은 "아니요"를 놓쳤다.
             "vad": {"provider": "silero", "activation_threshold": 0.5},
             # 말 끝 판정 대기(min_silence 0.4, endpointing 0.2)를 줄여도 응답 지연 2.4초가 줄지 않아 기본값으로 둔다.
-            # 0.6초보다 짧은 소리(주변 잡음)에는 AI가 말을 멈추지 않는다.
-            "session": {"allow_interruptions": True, "min_interruption_duration": 0.6},
+            # 0.9초보다 짧은 소리(기침, 주변 잡음, 짧은 맞장구)에는 AI가 말을 멈추지 않는다.
+            # 0.6에서는 카페 소음과 기침에 말이 끊겼다(10-06 테스트).
+            "session": {"allow_interruptions": True, "min_interruption_duration": 0.9},
             "tts": {
                 "provider": "cartesia",
                 "model": "sonic-3.5",

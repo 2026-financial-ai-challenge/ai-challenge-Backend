@@ -342,3 +342,49 @@ def test_no_mid_call_text_for_scenarios_without_a_link(monkeypatch):
 
     assert sent == []
     assert not link_exists(session_id)
+
+
+def test_status_callback_asks_clawops_for_the_answered_event():
+    """Status names are not callback events: asking for "in-progress" meant
+    ClawOps only ever reported the hang-up, so the mid-call text never fired."""
+    from app.services import call_service
+
+    events = call_service._STATUS_CALLBACK_EVENTS.split()
+    assert "answered" in events
+    assert "completed" in events
+    assert set(events) <= {"initiated", "ringing", "answered", "completed", "transfer"}
+
+
+def test_answered_callback_starts_the_timer_before_the_api_catches_up(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import call_service, report_service
+    from app.services.report_service import bind_call
+    from app.services.session_service import attach_call
+
+    session_id, _ = _authenticated_session()
+    bind_call(session_id, "CAlag")
+    attach_call(
+        session_id, "CAlag", scenario_id=WEB_TRAINING_SCENARIO_ID, agent_variant="external_tts"
+    )
+    monkeypatch.setattr(
+        report_service,
+        "_clawops_calls",
+        lambda: SimpleNamespace(get=lambda _id: SimpleNamespace(status="ringing")),
+    )
+    monkeypatch.setenv("MID_CALL_SMS_DELAY_SEC", "0")
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        web_training_service,
+        "send_sms",
+        lambda to, body: sent.append((to, body)) or "MG123",
+    )
+
+    async def answered() -> None:
+        await call_service.handle_call_status_event("CAlag", callback_status="in-progress")
+        await asyncio.gather(*list(call_service._background_tasks))
+
+    asyncio.run(answered())
+
+    assert len(sent) == 1
+    assert link_exists(session_id)

@@ -27,6 +27,7 @@ from app.services.report_service import (
     heuristic_report,
     register_transcript_listener,
     score_conversation,
+    _combine_reports,
     _scenario_report_note,
 )
 from app.services.session_service import attach_call, create_session, reset_sessions
@@ -616,6 +617,50 @@ def test_failed_unannounced_call_leaves_first_report_and_no_comparison(monkeypat
     assert stored.unannounced is None
     assert stored.final is None
     assert [turn.text for turn in stored.draftTurns] == ["검찰청입니다", "누구세요"]
+
+
+def test_final_report_lists_both_calls_behaviors_and_averages_the_score():
+    """A low averaged score must come with the first call's risks, not "no risk"."""
+    announced = TrainingReport(
+        score=5,
+        suspected=False,
+        gaveName=True,
+        triedHangup=False,
+        summary="1차",
+        coaching="1차 코칭",
+        riskBehaviors=[
+            BehaviorItem(label="개인정보 제공", evidence="류상준입니다."),
+            BehaviorItem(label="통화 장시간 지속", evidence="네, 네."),
+        ],
+        defenseBehaviors=[],
+        source="clawops",
+    )
+    unannounced = TrainingReport(
+        score=83,
+        suspected=True,
+        gaveName=False,
+        triedHangup=True,
+        summary="불시",
+        coaching="불시 코칭",
+        riskBehaviors=[BehaviorItem(label="통화 장시간 지속", evidence="네, 네.")],
+        defenseBehaviors=[
+            BehaviorItem(label="전화 종료(빠른 판단)", evidence="끊을게요."),
+        ],
+        source="clawops",
+    )
+
+    final = _combine_reports(announced, unannounced)
+
+    assert final is not None
+    assert final.score == 44
+    # First call first, then the unannounced call; the identical item once.
+    assert [(b.label, b.evidence) for b in final.riskBehaviors] == [
+        ("개인정보 제공", "류상준입니다."),
+        ("통화 장시간 지속", "네, 네."),
+    ]
+    assert [b.label for b in final.defenseBehaviors] == ["전화 종료(빠른 판단)"]
+    # Each call's own report is left as it was.
+    assert len(unannounced.riskBehaviors) == 1
 
 
 def test_get_report_api_none_then_draft(monkeypatch):

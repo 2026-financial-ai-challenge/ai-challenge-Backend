@@ -725,10 +725,29 @@ def _combine_reports(
         triedHangup=announced.triedHangup and unannounced.triedHangup,
         summary=" ".join(summary_parts),
         coaching=coaching,
-        riskBehaviors=unannounced.riskBehaviors,
-        defenseBehaviors=unannounced.defenseBehaviors,
+        # The score averages both calls, so the behaviours list both calls too:
+        # listing only the unannounced call's left a low score next to "no risk
+        # detected" whenever the first call held all the mistakes.
+        riskBehaviors=_merge_behaviors(announced.riskBehaviors, unannounced.riskBehaviors),
+        defenseBehaviors=_merge_behaviors(
+            announced.defenseBehaviors, unannounced.defenseBehaviors
+        ),
         source="comparison",
     )
+
+
+def _merge_behaviors(
+    first: list[BehaviorItem], second: list[BehaviorItem]
+) -> list[BehaviorItem]:
+    """Both calls' behaviours in call order, each distinct (label, evidence) once."""
+    merged: list[BehaviorItem] = []
+    seen: set[tuple[str, str]] = set()
+    for item in [*first, *second]:
+        key = (item.label, item.evidence)
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return merged
 
 
 def _save_report(

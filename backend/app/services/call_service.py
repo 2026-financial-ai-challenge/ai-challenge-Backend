@@ -525,10 +525,12 @@ def _make_call_agent(from_number: str, scenario):
     return _make_clawops_agent(from_number, scenario)
 
 
-# Terminal statuses plus in-progress: every one of them moves the session.
-_STATUS_CALLBACK_EVENTS = (
-    "in-progress completed no-answer busy failed canceled rejected"
-)
+# ClawOps callback *events*, not call statuses (docs: create-call,
+# StatusCallbackEvent). "answered" fires when the trainee picks up, which
+# starts the mid-call SMS timer; "completed" covers every terminal status.
+# Status names such as "in-progress" are not events and were silently
+# ignored, so only the hang-up callback ever arrived.
+_STATUS_CALLBACK_EVENTS = "ringing answered completed"
 _MISSED_STATUSES = {"no-answer", "busy", "rejected", "canceled"}
 _RINGING_STATUSES = {"queued", "ringing", "in-progress"}
 
@@ -668,7 +670,9 @@ def _schedule_mid_call_link(call_id: str, session_id: str) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-async def handle_call_status_event(call_id: str) -> None:
+async def handle_call_status_event(
+    call_id: str, *, callback_status: str = ""
+) -> None:
     """Managed-mode replacement for _monitor_call.
 
     The callback body only says which call changed, so the status is read back
@@ -692,7 +696,9 @@ async def handle_call_status_event(call_id: str) -> None:
 
     if status_name in _RINGING_STATUSES:
         update_call_status(session_id, "calling")
-        if status_name == "in-progress":
+        # The "answered" callback can be read back before the API shows
+        # in-progress, so the status in the callback body counts too.
+        if "in-progress" in {status_name, callback_status}:
             _schedule_mid_call_link(call_id, session_id)
         return
 

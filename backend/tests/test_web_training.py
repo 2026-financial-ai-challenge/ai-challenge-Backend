@@ -397,34 +397,70 @@ def test_answered_callback_starts_the_timer_before_the_api_catches_up(monkeypatc
 
 
 
-def test_link_actions_stay_out_of_the_phone_report():
-    """The report screen compares the phone score with the link score, so the
-    link is scored only in webTraining, never folded into the call report."""
-    from app.schemas.report import TrainingReport
-    from app.services.report_service import _save_report, bind_call, get_report
 
-    client = _client()
-    session_id, _ = _authenticated_session()
-    bind_call(session_id, "CAphone")
+# ---- link behaviour inside the call report --------------------------------
+
+
+def _call_report(session_id: str, *, score: int, risk=(), defense=()):
+    from app.schemas.report import BehaviorItem, TrainingReport
+    from app.services.report_service import _save_report, bind_call
+
+    bind_call(session_id, f"CA{session_id[-6:]}")
     _save_report(
         session_id,
         TrainingReport(
-            score=75,
+            score=score,
             suspected=False,
             gaveName=False,
             triedHangup=True,
             summary="통화 요약",
             coaching="코칭",
+            riskBehaviors=[BehaviorItem(label=l, evidence=e) for l, e in risk],
+            defenseBehaviors=[BehaviorItem(label=l, evidence=e) for l, e in defense],
             source="clawops",
         ),
         status="final",
     )
+
+
+def test_opening_the_link_lowers_the_call_report():
+    from app.services.report_service import get_report
+
+    client = _client()
+    session_id, _ = _authenticated_session()
+    _call_report(session_id, score=75, defense=[("전화 종료(빠른 판단)", "끊을게요.")])
     token = create_link(session_id)
     client.post(f"/v1/web-training/{token}/events", json={"eventType": "link_opened"})
 
     report = get_report(session_id)
 
-    assert report.draft is not None and report.draft.score == 75
-    assert report.draft.riskBehaviors == []
-    assert report.webTraining is not None and report.webTraining.score == 45
-    assert [b.label for b in report.webTraining.riskBehaviors] == ["링크 접근 의사"]
+    assert report.draft is not None
+    assert report.draft.score == 60
+    assert [(b.label, b.evidence) for b in report.draft.riskBehaviors] == [
+        ("링크 접근 의사", "웹 훈련: 문자 링크 열람")
+    ]
+    assert [b.label for b in report.draft.defenseBehaviors] == ["전화 종료(빠른 판단)"]
+
+
+def test_link_risk_already_scored_in_the_call_is_not_deducted_twice():
+    from app.services.report_service import get_report
+
+    client = _client()
+    session_id, _ = _authenticated_session()
+    _call_report(session_id, score=45, risk=[("링크 접근 의사", "열어 볼게요.")])
+    token = create_link(session_id)
+    client.post(f"/v1/web-training/{token}/events", json={"eventType": "link_opened"})
+
+    report = get_report(session_id)
+
+    assert report.draft.score == 45
+    assert [b.label for b in report.draft.riskBehaviors] == ["링크 접근 의사"]
+
+
+def test_no_link_activity_leaves_the_call_report_alone():
+    from app.services.report_service import get_report
+
+    session_id, _ = _authenticated_session()
+    _call_report(session_id, score=75)
+
+    assert get_report(session_id).draft.score == 75

@@ -3,7 +3,7 @@ import json
 import pytest
 
 from ai import managed_agent as ma
-from ai.safety import REAL_ORGS, UNSAFE_TOKEN
+from ai.safety import REAL_ORGS, SPOKEN_META, UNSAFE_TOKEN
 from ai.scenarios import SCENARIOS, get_scenario
 from ai.scenarios.library import PLAYBOOKS
 
@@ -51,6 +51,13 @@ def test_call_context_fits_and_carries_the_scenario(scenario_id):
     assert len(instruction) <= ma.CALL_CONTEXT_LIMIT
     assert instruction.startswith("[첫 마디]\n" + scenario.opening_line)
     assert scenario.hangup_line in instruction
+    # 포기 경고는 인물마다 다르다. 비면 공통 규칙이 가리킬 문장이 없다.
+    playbook = ma._playbook_for(scenario)
+    assert playbook.giveup_line and f"[거절할 때 경고]\n{playbook.giveup_line}" in instruction
+    # 승낙 뒤 갈 단계가 없으면 즉흥 질문을 이어 간다(10-05 통화 CA0c987dc)
+    assert playbook.handoff_line and f"[승낙받으면 넘김]\n{playbook.handoff_line}" in instruction
+    for line in (playbook.hangup_line, playbook.giveup_line, playbook.handoff_line):
+        assert not SPOKEN_META.search(line), line
     assert f"최대 {scenario.max_turns}번" in instruction
     assert "[사건" in instruction and "[받아치기]" in instruction
     assert ctx["variables"]["scenario_id"] == scenario_id

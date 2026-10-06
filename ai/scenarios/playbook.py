@@ -70,6 +70,10 @@ class Playbook:
     # an LLM call, so the reply must fit anywhere in the conversation.
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
+    # 거절했을 때 한 번 하는 포기 경고. 인물마다 손해나 불이익으로 압박한다.
+    giveup_line: str = ""
+    # 목표의 마지막 요구를 승낙받으면 하는 넘김 말. 이 말 뒤 상대가 한 번 더 말하면 통화를 끝낸다.
+    handoff_line: str = ""
     tts_voice_id: str | None = None
     # Pre-written lines for the script call mode. Unlike turn_plan these ARE
     # spoken verbatim, so each one must read as a finished caller line: one

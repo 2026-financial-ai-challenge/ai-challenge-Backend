@@ -69,12 +69,12 @@ LEADING_ROOMS: dict[str, LeadingRoom] = {
     "ipo_allocation": LeadingRoom(
         scenario_id="ipo_allocation",
         sms_body=(
-            "[누리솔투자자문] 고객님, 방금 통화드린 한지수 매니저입니다.\n"
+            "[온새미투자자문] 고객님, 방금 통화드린 한지수 매니저입니다.\n"
             "공모주 기관 물량 우선 배정방 입장 링크 보내드려요. 배정 마감 세 시간 전이니 서둘러 주세요."
         ),
-        room_title="누리솔 VIP 공모주 우선배정방",
+        room_title="온새미 VIP 공모주 우선배정방",
         member_count=327,
-        invite_text="한지수 매니저님이 '누리솔 VIP 공모주 우선배정방'에 초대했습니다.",
+        invite_text="한지수 매니저님이 '온새미 VIP 공모주 우선배정방'에 초대했습니다.",
         input_notice="공지방입니다. 문의는 1:1 상담으로 남겨 주세요.",
         messages=(
             RoomMessage(_MANAGER, "새로 오신 고객님들 환영합니다. 오늘 기관 배정 물량 안내드릴게요.", 800, True),

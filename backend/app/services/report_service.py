@@ -55,7 +55,7 @@ DEFENSE_SCORE_WEIGHTS = {
 # 웹 훈련 이벤트를 전화 훈련과 같은 행동 라벨로 환산한다. 전화에서는 "의사"만
 # 확인되지만 웹에서는 실제 행동이 남으므로, 같은 라벨·같은 가중치를 그대로 쓰되
 # 증거 문구만 웹 맥락으로 표기한다. 매핑이 없는 이벤트는 점수에 반영하지 않는다.
-# 결과는 webTraining으로 따로 내고, 리포트 화면이 전화 점수와 나란히 비교한다.
+# 이 행동들은 문자를 보낸 통화의 리포트 점수와 위험·방어 목록에 합쳐진다(_with_web_behaviors).
 WEB_EVENT_LABELS: dict[str, str] = {
     # 문자 링크를 연 것 자체가 사기범이 노리는 첫 행동이다.
     "link_opened": "링크 접근 의사",
@@ -205,6 +205,7 @@ def get_report(session_id: str) -> GetReportResponse:
         # and the comparison of the two. The comparison only exists when both
         # calls produced a report; a missing one is shown as "not created".
         final_report: TrainingReport | None = None
+        unannounced_report: TrainingReport | None = None
 
         # The unannounced call runs in its own session so retries and call records
         # stay independent. For the user-facing report, however, it is the final
@@ -242,19 +243,21 @@ def get_report(session_id: str) -> GetReportResponse:
                     )
                     call = result_call or call
                     turns = unannounced_turn_rows
-                    final_report = _combine_reports(
-                        _report_schema(announced_row),
+                    unannounced_report = _with_web_behaviors(
                         _report_schema(unannounced_row),
+                        _web_event_types(db, scheduled.result_session_id),
                     )
             round_done = unannounced_row is not None or scheduled.status == "completed"
-        web_event_types = db.scalars(
-            select(WebTrainingEvent.event_type)
-            .where(WebTrainingEvent.session_id == session_id)
-            .order_by(WebTrainingEvent.created_at)
-        ).all()
+        web_event_types = _web_event_types(db, session_id)
         web_training = (
-            score_web_events(list(web_event_types)) if web_event_types else None
+            score_web_events(web_event_types) if web_event_types else None
         )
+        # What the trainee did on the texted link counts against the call that
+        # sent it, so the call report and the final average both reflect it.
+        announced_report = _with_web_behaviors(
+            _report_schema(announced_row), web_event_types
+        )
+        final_report = _combine_reports(announced_report, unannounced_report)
 
         status: ReportStatus = (
             "final"
@@ -272,14 +275,56 @@ def get_report(session_id: str) -> GetReportResponse:
             turns=[TranscriptTurn(role=row.role, text=row.text) for row in turns],
             draftTurns=_turn_schemas(announced_turn_rows),
             unannouncedTurns=_turn_schemas(unannounced_turn_rows),
-            draft=_report_schema(announced_row),
-            unannounced=_report_schema(unannounced_row),
+            draft=announced_report,
+            unannounced=unannounced_report,
             final=final_report,
             clawopsSummary=(unannounced_row or announced_row).clawops_summary
             if (unannounced_row or announced_row) is not None
             else None,
             webTraining=web_training,
         )
+
+
+def _web_event_types(db, session_id: str) -> list[str]:
+    return list(
+        db.scalars(
+            select(WebTrainingEvent.event_type)
+            .where(WebTrainingEvent.session_id == session_id)
+            .order_by(WebTrainingEvent.created_at)
+        ).all()
+    )
+
+
+def _with_web_behaviors(
+    report: TrainingReport | None, event_types: list[str]
+) -> TrainingReport | None:
+    """Add the texted link's behaviours to a call report and adjust its score.
+
+    A label the call already scored is not counted twice. The weight is added
+    to the stored score rather than rescoring the whole list, so a heuristic
+    report keeps its own base.
+    """
+    if report is None or not event_types:
+        return report
+    web = score_web_events(event_types)
+    risk_seen = {item.label for item in report.riskBehaviors}
+    defense_seen = {item.label for item in report.defenseBehaviors}
+    new_risk = [item for item in web.riskBehaviors if item.label not in risk_seen]
+    new_defense = [
+        item for item in web.defenseBehaviors if item.label not in defense_seen
+    ]
+    if not new_risk and not new_defense:
+        return report
+    delta = sum(RISK_SCORE_WEIGHTS.get(item.label, 0) for item in new_risk) + sum(
+        DEFENSE_SCORE_WEIGHTS.get(item.label, 0) for item in new_defense
+    )
+    return report.model_copy(
+        update={
+            "score": max(0, min(100, report.score + delta)),
+            "riskBehaviors": [*report.riskBehaviors, *new_risk],
+            "defenseBehaviors": [*report.defenseBehaviors, *new_defense],
+        }
+    )
 
 
 def _turn_rows(db, session_id: str, source: str) -> list[TranscriptTurnRecord]:

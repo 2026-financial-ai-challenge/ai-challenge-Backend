@@ -1,5 +1,3 @@
-import asyncio
-
 import pytest
 
 from app.training.scenarios import (
@@ -35,7 +33,6 @@ def test_library_covers_every_expected_scenario():
 
 
 def test_library_text_passes_the_safety_gates():
-    """Every line that can reach the prompt or the phone clears ai/safety.py."""
     from ai.safety import REAL_ORGS as _REAL_ORGS
     from ai.safety import SPOKEN_META as _SPOKEN_META
     from ai.safety import UNSAFE_TOKEN as _UNSAFE_TOKEN
@@ -58,7 +55,6 @@ def test_library_text_passes_the_safety_gates():
             *playbook.red_flags,
             *(line for pair in playbook.examples for line in pair),
             *(reply for _trigger, reply in playbook.quick_replies),
-            # Spoken verbatim in script mode, so held to the same bar.
             *playbook.progression,
             *(line for reply in playbook.script for line in reply.lines),
         ]
@@ -69,10 +65,6 @@ def test_library_text_passes_the_safety_gates():
 
 
 def test_every_scenario_uses_a_voice_this_account_can_synthesize():
-    """Hanna and Zara return zero bytes on this ElevenLabs plan, which is
-    silence on the call rather than a different-sounding voice. Assigning one
-    to a scenario is invisible while ELEVENLABS_VOICE_RANDOM=true and breaks
-    the call the moment it is turned off."""
     from ai.scenarios import SCENARIOS
     from ai.voices import WORKING_VOICE_IDS
 
@@ -98,7 +90,6 @@ def test_system_prompt_carries_the_event_and_the_plan():
     assert "[사건" in scenario.system_prompt
     assert "[진행]" in scenario.system_prompt
     assert "[받아치기]" in scenario.system_prompt
-    # The examples teach reply length, which is what keeps a turn short.
     assert "[말의 길이와 결은 이 정도로 한다]" in scenario.system_prompt
 
 
@@ -124,22 +115,19 @@ def test_pick_scenario_never_repeats_back_to_back():
     picks = [pick_scenario().id for _ in range(20)]
     assert set(picks) <= EXPECTED_IDS
     assert all(a != b for a, b in zip(picks, picks[1:]))
-    # Over 20 draws a five-scenario pool should not collapse to one or two.
     assert len(set(picks)) >= 3
 
 
 def test_runtime_scenario_comes_from_the_fixed_library(monkeypatch):
-    """Scenarios are written ahead of time, never per call: the script mode
-    needs every line known before the phone rings so it can be prerendered."""
     monkeypatch.delenv("CALL_SCENARIO", raising=False)
-    scenario = asyncio.run(get_runtime_scenario())
+    scenario = get_runtime_scenario()
     assert scenario.id in EXPECTED_IDS
     assert scenario.progression and scenario.script
 
 
 def test_pinned_scenario_disables_rotation(monkeypatch):
     monkeypatch.setenv("CALL_SCENARIO", "investigation_unit")
-    scenario = asyncio.run(get_runtime_scenario())
+    scenario = get_runtime_scenario()
     assert scenario.id == "investigation_unit"
     assert scenario.id == get_call_scenario().id
 
@@ -148,8 +136,8 @@ def test_announced_pin_applies_to_the_first_call_only(monkeypatch):
     monkeypatch.delenv("CALL_SCENARIO", raising=False)
     monkeypatch.setenv("ANNOUNCED_CALL_SCENARIO", "investigation_unit")
 
-    announced = [asyncio.run(get_runtime_scenario("announced")).id for _ in range(10)]
-    unannounced = {asyncio.run(get_runtime_scenario("unannounced")).id for _ in range(20)}
+    announced = [get_runtime_scenario("announced").id for _ in range(10)]
+    unannounced = {get_runtime_scenario("unannounced").id for _ in range(20)}
 
     assert set(announced) == {"investigation_unit"}
     assert len(unannounced) >= 2
@@ -175,10 +163,6 @@ def test_reflex_trigger_matching(utterance, trigger):
 
 
 def test_reflex_ignores_a_trigger_word_inside_a_long_answer():
-    """A reflex answers a one-liner. PhonePipelineSession now hands over a
-    whole merged answer, and "누구" somewhere inside one is an argument, not
-    a request to introduce yourself -- answering it from the table would talk
-    straight past everything else the trainee said."""
     from ai.scenarios.reflex import match_trigger
 
     assert (
@@ -202,9 +186,9 @@ def test_reflex_table_fires_once_per_trigger_and_respects_budget():
         budget=2,
     )
     assert table.take("누구세요") == "가온금융안전원 서동현입니다."
-    assert table.take("누구세요") is None  # one shot per trigger
+    assert table.take("누구세요") is None
     assert table.take("지금 바빠요") == "확인 한 가지만 하겠습니다."
-    assert table.take("안 들려요") is None  # budget spent
+    assert table.take("안 들려요") is None
     assert table.remaining == 0
 
 

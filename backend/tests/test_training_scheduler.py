@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
 from app.database import SessionLocal
@@ -25,6 +26,13 @@ from app.services.training_scheduler import (
 
 def setup_function() -> None:
     reset_sessions()
+
+
+@pytest.fixture(autouse=True)
+def _default_delay_range(monkeypatch):
+    # backend/.env의 지연 설정과 무관하게 기본값(30~60분)으로 검사한다.
+    monkeypatch.delenv("UNANNOUNCED_CALL_MIN_DELAY_SEC", raising=False)
+    monkeypatch.delenv("UNANNOUNCED_CALL_MAX_DELAY_SEC", raising=False)
 
 
 def _announced_session() -> str:
@@ -193,7 +201,6 @@ def _exhaust_retries(monkeypatch, source_session_id: str) -> None:
 
 
 def test_failed_unannounced_call_releases_the_source_report(monkeypatch):
-    """A draft left waiting on a dead job kept the dashboard "in progress" for good."""
     source_session_id = _announced_session()
     update_report_status(source_session_id, "draft")
 
@@ -216,7 +223,6 @@ def test_failed_unannounced_call_leaves_a_pending_report_alone(monkeypatch):
     with SessionLocal() as db:
         source = db.get(TrainingSession, source_session_id)
         assert source is not None and source.report_status == "pending"
-    # The report finishing later goes straight to final instead of draft.
     assert _has_scheduled_unannounced_training(source_session_id) is False
 
 

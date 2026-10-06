@@ -24,7 +24,12 @@ from app.phone_verification_store import (
     store_challenge,
     token_was_spent,
 )
-from app.schemas.auth import AuthParticipant, AuthResponse, RequestSignupOtpResponse, VerifySignupOtpResponse
+from app.schemas.auth import (
+    AuthParticipant,
+    AuthResponse,
+    RequestSignupOtpResponse,
+    VerifySignupOtpResponse,
+)
 from app.services.session_service import mask_phone_number
 from app.services.sms_service import expose_dev_code, send_verification_code
 
@@ -55,9 +60,7 @@ def request_signup_otp(db: Session, phone: str) -> RequestSignupOtpResponse:
     try:
         send_verification_code(phone, code)
     except Exception:
-        # Undo both: a failed delivery should leave no challenge to guess at,
-        # and should not make the caller sit out a cooldown for a code that
-        # never arrived.
+        # 발송에 실패한 코드는 남기지 않고, 재요청 대기 시간도 되돌린다.
         discard_challenge(phone)
         release_send_slot(phone)
         raise ApiError(502, "SMS_SEND_FAILED", "인증번호 발송에 실패했습니다.") from None
@@ -68,12 +71,9 @@ def request_signup_otp(db: Session, phone: str) -> RequestSignupOtpResponse:
 
 
 def verify_signup_otp(phone: str, code: str) -> VerifySignupOtpResponse:
-    """No database: the challenge lives only in Redis."""
     phone = normalize_phone(phone)
     challenge = read_challenge(phone)
     if challenge is None:
-        # Lapsed, already solved, or never requested: the key is gone in every
-        # case, so the one answer that is always actionable is to ask again.
         raise ApiError(400, "OTP_NOT_REQUESTED", "인증번호를 먼저 요청해 주세요.")
     if int(challenge.get("fail_count", 0)) >= MAX_FAILS:
         raise ApiError(429, "OTP_LOCKED", "인증 시도 횟수를 초과했습니다.")
@@ -106,7 +106,9 @@ def signup(
             raise ApiError(400, "VERIFICATION_TOKEN_USED", "이미 사용된 인증 토큰입니다.")
         raise ApiError(400, "INVALID_VERIFICATION_TOKEN", "유효하지 않은 인증 토큰입니다.")
     now = _now()
-    participant = db.scalar(select(Participant).where(Participant.phone_number == phone).with_for_update())
+    participant = db.scalar(
+        select(Participant).where(Participant.phone_number == phone).with_for_update()
+    )
     if participant is not None and participant.password_hash is not None:
         raise ApiError(409, "PHONE_ALREADY_REGISTERED", "이미 가입된 전화번호입니다.")
     if participant is None:
@@ -123,7 +125,11 @@ def signup(
 def login(db: Session, phone: str, password: str) -> AuthResponse:
     phone = normalize_phone(phone)
     participant = db.scalar(select(Participant).where(Participant.phone_number == phone))
-    if participant is None or participant.password_hash is None or not verify_password(password, participant.password_hash):
+    if (
+        participant is None
+        or participant.password_hash is None
+        or not verify_password(password, participant.password_hash)
+    ):
         raise ApiError(401, "INVALID_CREDENTIALS", "전화번호 또는 비밀번호가 올바르지 않습니다.")
     return _auth_response(participant)
 
@@ -138,7 +144,8 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, encoded: str) -> bool:
     try:
         algorithm, rounds, salt, expected = encoded.split("$", 3)
-        if algorithm != "pbkdf2_sha256": return False
+        if algorithm != "pbkdf2_sha256":
+            return False
         actual = hashlib.pbkdf2_hmac("sha256", password.encode(), _unb64(salt), int(rounds))
         return hmac.compare_digest(actual, _unb64(expected))
     except (ValueError, TypeError):
@@ -147,19 +154,19 @@ def verify_password(password: str, encoded: str) -> bool:
 
 def create_access_token(participant_id: int) -> str:
     now = int(_now().timestamp())
-    header = _b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
-    payload = _b64(json.dumps({"sub": str(participant_id), "iat": now, "exp": now + ACCESS_TOKEN_TTL_SEC}, separators=(",", ":")).encode())
-    signature = _b64(hmac.new(_jwt_secret(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
-    return f"{header}.{payload}.{signature}"
+    header = _b64_json({"alg": "HS256", "typ": "JWT"})
+    payload = _b64_json({"sub": str(participant_id), "iat": now, "exp": now + ACCESS_TOKEN_TTL_SEC})
+    return f"{header}.{payload}.{_sign(header, payload)}"
 
 
 def decode_access_token(token: str) -> int:
     try:
         header, payload, signature = token.split(".")
-        expected = _b64(hmac.new(_jwt_secret(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
-        if not hmac.compare_digest(signature, expected): raise ValueError
+        if not hmac.compare_digest(signature, _sign(header, payload)):
+            raise ValueError
         data = json.loads(_unb64(payload))
-        if int(data["exp"]) <= int(_now().timestamp()): raise ValueError
+        if int(data["exp"]) <= int(_now().timestamp()):
+            raise ValueError
         return int(data["sub"])
     except (ValueError, KeyError, TypeError, json.JSONDecodeError):
         raise ApiError(401, "INVALID_ACCESS_TOKEN", "로그인이 필요합니다.") from None
@@ -174,12 +181,15 @@ def record_training_consent(participant: Participant, *, now: datetime | None = 
 
 
 def _auth_response(participant: Participant) -> AuthResponse:
-    return AuthResponse(accessToken=create_access_token(participant.id), expiresInSec=ACCESS_TOKEN_TTL_SEC,
+    return AuthResponse(
+        accessToken=create_access_token(participant.id),
+        expiresInSec=ACCESS_TOKEN_TTL_SEC,
         participant=AuthParticipant(
             id=participant.id,
             phoneNumberMasked=mask_phone_number(participant.phone_number),
             hasConsented=participant.has_training_consent(),
-        ))
+        ),
+    )
 
 
 def _validate_password(password: str) -> None:
@@ -187,8 +197,29 @@ def _validate_password(password: str) -> None:
         raise ApiError(400, "WEAK_PASSWORD", "비밀번호는 영문과 숫자를 포함해 8자 이상이어야 합니다.")
 
 
-def _digest(value: str) -> str: return hashlib.sha256(value.encode()).hexdigest()
-def _b64(value: bytes) -> str: return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
-def _unb64(value: str) -> bytes: return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-def _jwt_secret() -> bytes: return os.getenv("JWT_SECRET", "local-development-secret-change-me").encode()
-def _now() -> datetime: return datetime.now(timezone.utc)
+def _sign(header: str, payload: str) -> str:
+    return _b64(hmac.new(_jwt_secret(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _b64(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
+def _b64_json(value: dict) -> str:
+    return _b64(json.dumps(value, separators=(",", ":")).encode())
+
+
+def _unb64(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _jwt_secret() -> bytes:
+    return os.getenv("JWT_SECRET", "local-development-secret-change-me").encode()
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)

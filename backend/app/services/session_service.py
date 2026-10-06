@@ -60,26 +60,15 @@ def get_session(session_id: str) -> SessionResponse | None:
 def list_sessions_for_participant(participant_id: int) -> list[SessionResponse]:
     with SessionLocal() as db:
         sessions = db.scalars(
-            select(TrainingSession)
-            .options(
-                selectinload(TrainingSession.consent),
-                selectinload(TrainingSession.participant),
-                selectinload(TrainingSession.calls),
-            )
+            _session_select()
             .where(
                 TrainingSession.participant_id == participant_id,
-                # An unannounced call is the second half of the announced
-                # session's round, reported there, not a round of its own.
+                # 불시 전화 세션은 1차 세션 회차에 포함되므로 따로 나열하지 않는다.
                 TrainingSession.current_training_type != "unannounced",
             )
             .order_by(TrainingSession.created_at.desc())
         )
         return [_to_response(session) for session in sessions]
-
-
-def session_exists(session_id: str) -> bool:
-    with SessionLocal() as db:
-        return db.get(TrainingSession, session_id) is not None
 
 
 def get_phone_number(session_id: str) -> str | None:
@@ -95,15 +84,7 @@ def update_call_status(
     session_id: str,
     call_status: Literal["waiting", "calling", "completed", "missed", "silent", "failed"],
 ) -> SessionResponse | None:
-    with SessionLocal.begin() as db:
-        session = db.scalar(_session_query(session_id))
-        if session is None:
-            return None
-
-        session.call_status = call_status
-        session.updated_at = datetime.now(timezone.utc)
-        db.flush()
-        return _to_response(session)
+    return _update_session(session_id, call_status=call_status)
 
 
 def attach_call(
@@ -162,12 +143,16 @@ def update_report_status(
     session_id: str,
     report_status: Literal["none", "pending", "draft", "final", "failed"],
 ) -> SessionResponse | None:
+    return _update_session(session_id, report_status=report_status)
+
+
+def _update_session(session_id: str, **fields) -> SessionResponse | None:
     with SessionLocal.begin() as db:
         session = db.scalar(_session_query(session_id))
         if session is None:
             return None
-
-        session.report_status = report_status
+        for name, value in fields.items():
+            setattr(session, name, value)
         session.updated_at = datetime.now(timezone.utc)
         db.flush()
         return _to_response(session)
@@ -194,16 +179,16 @@ def reset_sessions() -> None:
     reset_reports()
 
 
-def _session_query(session_id: str):
-    return (
-        select(TrainingSession)
-        .options(
-            selectinload(TrainingSession.consent),
-            selectinload(TrainingSession.participant),
-            selectinload(TrainingSession.calls),
-        )
-        .where(TrainingSession.id == session_id)
+def _session_select():
+    return select(TrainingSession).options(
+        selectinload(TrainingSession.consent),
+        selectinload(TrainingSession.participant),
+        selectinload(TrainingSession.calls),
     )
+
+
+def _session_query(session_id: str):
+    return _session_select().where(TrainingSession.id == session_id)
 
 
 def _to_response(session: TrainingSession) -> SessionResponse:

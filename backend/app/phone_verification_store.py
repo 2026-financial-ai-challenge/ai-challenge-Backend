@@ -1,16 +1,4 @@
-"""Redis-backed signup verification state.
-
-A challenge and the token it earns only matter for minutes, so Redis holds
-them under a TTL instead of Postgres holding them forever. Two things follow
-from that and the callers below depend on both:
-
-- There is no cleanup job to forget. The old phone_verifications table kept
-  every phone number that ever requested a code, including people who never
-  finished signing up, because nothing ever deleted the rows.
-- A lapsed challenge is simply absent. Expiry is not a timestamp anyone
-  compares against; the key is gone, so "expired" and "never requested" are
-  the same answer here.
-"""
+"""회원가입 휴대폰 인증 상태를 Redis에 TTL로 저장한다. 만료된 값은 키가 사라져 별도 정리 작업이 필요 없다."""
 
 import logging
 import os
@@ -36,8 +24,7 @@ def _client() -> redis.Redis:
 
 
 def mark_phone_verified(participant_id: int, when: datetime) -> None:
-    # Signup already succeeded and is committed by the time we get here, so a
-    # Redis outage must not turn a finished signup into a 500.
+    # 가입은 이미 커밋된 뒤라, Redis 장애로 가입 응답을 실패시키지 않는다.
     try:
         _client().set(f"{KEY_PREFIX}{participant_id}", when.isoformat())
     except redis.RedisError:
@@ -45,27 +32,18 @@ def mark_phone_verified(participant_id: int, when: datetime) -> None:
 
 
 def claim_send_slot(phone: str, cooldown_sec: int) -> bool:
-    """Reserve the right to send this phone a code, or return False.
-
-    The key's own TTL is the resend window, so there is no "when was the last
-    one" timestamp to read back -- and nothing to keep once it lapses.
-    """
+    """재발송 대기 시간 동안 한 번만 발송을 허용한다. 이미 대기 중이면 False."""
     return bool(
         _client().set(f"{_COOLDOWN_PREFIX}{phone}", "1", nx=True, ex=cooldown_sec)
     )
 
 
 def release_send_slot(phone: str) -> None:
-    """Hand the slot back, so a send that failed does not burn the cooldown."""
     _client().delete(f"{_COOLDOWN_PREFIX}{phone}")
 
 
 def store_challenge(phone: str, code_hash: str, ttl_sec: int) -> None:
-    """Replace any challenge for this phone with a fresh one.
-
-    Replace rather than update: a newly sent code deserves the full attempt
-    budget, and the previous challenge may already have failures against it.
-    """
+    """새 인증번호로 교체하고 실패 횟수를 0부터 다시 센다."""
     key = f"{_CODE_PREFIX}{phone}"
     pipe = _client().pipeline()
     pipe.delete(key)
@@ -79,12 +57,6 @@ def read_challenge(phone: str) -> dict[str, str] | None:
 
 
 def count_failure(phone: str) -> int:
-    """Record a wrong code and return the new failure count.
-
-    HINCRBY is atomic, which is what the row lock used to buy: two requests
-    racing on the same challenge cannot both read the same count and overwrite
-    each other's increment.
-    """
     return _client().hincrby(f"{_CODE_PREFIX}{phone}", "fail_count", 1)
 
 
@@ -93,7 +65,6 @@ def discard_challenge(phone: str) -> None:
 
 
 def issue_token(phone: str, token_hash: str, ttl_sec: int) -> None:
-    """Trade a solved challenge for a token, and retire the challenge."""
     pipe = _client().pipeline()
     pipe.set(f"{_TOKEN_PREFIX}{token_hash}", phone, ex=ttl_sec)
     pipe.delete(f"{_CODE_PREFIX}{phone}")
@@ -101,16 +72,10 @@ def issue_token(phone: str, token_hash: str, ttl_sec: int) -> None:
 
 
 def consume_token(token_hash: str, *, spent_ttl_sec: int) -> str | None:
-    """The phone this token verified, or None. Spends the token.
+    """토큰이 인증한 전화번호를 돌려주고 토큰을 소모한다.
 
-    Read and delete are one command, which is what makes the token single use:
-    two signups racing on the same token cannot both be handed a phone number.
-    The cost is that a signup which fails after this point cannot retry on the
-    same token -- acceptable, because the realistic failure is "already
-    registered", where another attempt would fail the same way.
-
-    A spent token leaves a marker behind so a replay can be reported as such
-    rather than as a token that never existed.
+    읽기와 삭제를 한 명령(GETDEL)으로 해 동시 요청에도 한 번만 쓰이게 한다.
+    재사용 시도를 구분하도록 소모 표시를 남긴다.
     """
     phone = _client().getdel(f"{_TOKEN_PREFIX}{token_hash}")
     if phone is not None:
@@ -123,7 +88,7 @@ def token_was_spent(token_hash: str) -> bool:
 
 
 def reset_signup_state() -> None:
-    """Drop every challenge, cooldown and token. For tests."""
+    """테스트용: 모든 인증 상태를 지운다."""
     client = _client()
     for prefix in _SIGNUP_PREFIXES:
         keys = list(client.scan_iter(match=f"{prefix}*"))

@@ -14,12 +14,7 @@ from app.routers import auth, call, consent, report, session, web_training, webh
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _REPO_DIR = Path(__file__).resolve().parents[2]
-# Never override: a value already in the environment was put there
-# deliberately -- by compose's env_file, or by a test run that
-# just pointed us at a scratch database -- and this file carries the deployed
-# DATABASE_URL, so overriding used to be able to hand a test suite the real
-# one. Precedence between the two files is unchanged: backend/.env is loaded
-# first and dotenv keeps the first value it sees.
+# 이미 환경에 있는 값(compose env_file, 테스트용 DB 주소)은 덮어쓰지 않는다.
 for _env_file in (
     _BACKEND_DIR / ".env",
     _REPO_DIR / "ai" / ".env",
@@ -27,14 +22,13 @@ for _env_file in (
 ):
     load_dotenv(_env_file, override=False)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
-logging.getLogger("clawops.agent").setLevel(logging.INFO)
 
 
 _WEB_TRAINING_TOKEN_PATH = re.compile(r"^(/v1/web-training/)(?!sessions/)[^/?]+")
 
 
 class _MaskWebTrainingToken(logging.Filter):
-    """접근 로그에서 웹 훈련 링크 토큰을 가린다 — 토큰이 곧 접근 권한이다."""
+    """접근 로그에서 웹 훈련 링크 토큰을 가린다. 토큰이 곧 접근 권한이다."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         # uvicorn 접근 로그 args: (client, method, path, http_version, status)
@@ -48,43 +42,34 @@ class _MaskWebTrainingToken(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_MaskWebTrainingToken())
 logging.getLogger(__name__).info(
-    "Signup SMS: ClawOps (%s) · call AI: PipelineSession (%s)",
+    "ClawOps SMS: %s · call scenario: %s",
     "configured"
     if all(
         os.getenv(name)
         for name in ("CLAWOPS_API_KEY", "CLAWOPS_ACCOUNT_ID", "CLAWOPS_SMS_FROM")
     )
     else "configuration missing",
-    os.getenv("CALL_SCENARIO", "").strip() or "고정 시나리오 무작위 선택",
+    os.getenv("CALL_SCENARIO", "").strip() or "random",
 )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    from app.services.data_retention import (
-        start_retention_scheduler,
-        stop_retention_scheduler,
-    )
-    from app.services.training_scheduler import (
-        start_training_scheduler,
-        stop_training_scheduler,
-    )
+    from app.services.data_retention import retention_worker
+    from app.services.training_scheduler import training_scheduler
 
-    start_training_scheduler()
-    start_retention_scheduler()
+    workers = (training_scheduler, retention_worker)
+    for worker in workers:
+        worker.start()
     try:
         yield
     finally:
-        stop_training_scheduler()
-        stop_retention_scheduler()
+        for worker in workers:
+            worker.stop()
 
 
 app = FastAPI(lifespan=lifespan)
 
-# An origin the browser sends but we do not list gets a 400 "Disallowed CORS
-# origin" before any handler runs, which from the frontend is indistinguishable
-# from the backend being down. The deployed frontend was missing here, so every
-# request from it failed that way.
 _ALLOWED_ORIGINS = (
     "http://localhost:3000",
     "http://localhost:3001",
@@ -93,17 +78,12 @@ _ALLOWED_ORIGINS = (
     "https://safety-phishing-call.vercel.app",
     "https://gaoncs.vercel.app",
 )
-# Vercel gives every preview deploy its own subdomain, so PR previews would
-# otherwise need a backend redeploy each time to be allowed through.
+# Vercel 미리보기 배포는 매번 하위 도메인이 달라 패턴으로 허용한다.
 _PREVIEW_ORIGIN_PATTERN = r"https://safety-phishing-call-[a-z0-9-]+\.vercel\.app"
 
 
 def _allowed_origins() -> list[str]:
-    """The static list plus anything CORS_ALLOWED_ORIGINS adds.
-
-    A trailing slash is stripped because the browser's Origin header never has
-    one, so "https://example.com/" in the list would silently match nothing.
-    """
+    """기본 목록에 CORS_ALLOWED_ORIGINS를 더한다. Origin 헤더에는 끝 슬래시가 없어 지운다."""
     extra = os.getenv("CORS_ALLOWED_ORIGINS", "")
     return list(_ALLOWED_ORIGINS) + [
         origin.strip().rstrip("/") for origin in extra.split(",") if origin.strip()

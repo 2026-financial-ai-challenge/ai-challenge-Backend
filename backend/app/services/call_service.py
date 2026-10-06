@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import logging
 import os
 from datetime import datetime, timezone
@@ -9,12 +8,9 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.models.call import Call
-from app.models.transcript_turn import TranscriptTurnRecord
+from app.services import report_service
 from app.services.report_service import (
     bind_call,
-    build_draft_report,
-    get_report,
-    register_transcript_listener,
     request_clawops_transcript,
     session_id_for_call,
 )
@@ -30,540 +26,71 @@ from app.training.scenarios import ensure_ai_importable, get_runtime_scenario
 
 
 logger = logging.getLogger(__name__)
+
+# ClawOps 콜백 "이벤트" 이름이다(통화 상태 이름이 아님). answered에서 통화 중 문자 타이머를 건다.
+_STATUS_CALLBACK_EVENTS = "ringing answered completed"
+_MISSED_STATUSES = {"no-answer", "busy", "rejected", "canceled"}
+_RINGING_STATUSES = {"queued", "ringing", "in-progress"}
+
 _outbound_lock = Lock()
+# asyncio는 태스크를 약한 참조로만 들고 있어서, 끝날 때까지 여기서 붙잡아 둔다.
+_background_tasks: set[asyncio.Task] = set()
+_mid_call_link_calls: set[str] = set()
 
 
 class CallServiceError(Exception):
     pass
 
 
-class SessionNotFoundError(CallServiceError):
-    pass
-
-
-class PhoneNotRegisteredError(CallServiceError):
-    pass
-
-
-class CallConfigurationError(CallServiceError):
-    pass
-
-
-class CallInProgressError(CallServiceError):
-    pass
-
-
-def trainee_spoke(session_id: str, call_id: str | None = None) -> bool:
-    if call_id is not None:
-        return _call_has_turn(session_id, call_id, role="user")
-    return any(
-        turn.role == "user" and turn.text.strip()
-        for turn in get_report(session_id).turns
-    )
-
-
-def call_had_transcript(session_id: str, call_id: str | None = None) -> bool:
-    if call_id is not None:
-        return _call_has_turn(session_id, call_id)
-    return any(turn.text.strip() for turn in get_report(session_id).turns)
-
-
-def _call_has_turn(
-    session_id: str,
-    call_id: str,
-    *,
-    role: str | None = None,
-) -> bool:
-    with SessionLocal() as db:
-        statement = (
-            select(TranscriptTurnRecord.id)
-            .join(Call, TranscriptTurnRecord.call_id == Call.id)
-            .where(
-                Call.session_id == session_id,
-                Call.clawops_call_id == call_id,
-                TranscriptTurnRecord.text != "",
-            )
-            .limit(1)
-        )
-        if role is not None:
-            statement = statement.where(TranscriptTurnRecord.role == role)
-        return db.scalar(statement) is not None
-
-
-def _require_env(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise CallConfigurationError(f"{name} is not set")
-    cleaned = "".join(ch for ch in value if ch.isascii() and not ch.isspace())
-    if cleaned != value:
-        logger.warning("%s had non-ASCII or whitespace characters; they were stripped", name)
-        os.environ[name] = cleaned
-    return cleaned
-
-
-def _call_llm_provider() -> str:
-    """Which LLM answers the trainee during the live call.
-
-    'openai' (default) or 'gemini'. When both keys are set the other one is
-    the automatic fallback for a turn (see _build_call_llm).
-    """
-    return os.getenv("CALL_LLM_PROVIDER", "openai").strip().lower() or "openai"
-
-
-def _require_call_llm_key() -> None:
-    if _call_llm_provider() == "gemini":
-        _require_env("GEMINI_API_KEY")
-    else:
-        _require_env("OPENAI_API_KEY")
-
-
-def _supported_kwargs(cls, **kwargs):
-    params = inspect.signature(cls).parameters
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return kwargs
-    return {key: value for key, value in kwargs.items() if key in params}
-
-
-def _tts_voice_id(scenario) -> str:
-    random_enabled = os.getenv(
-        "ELEVENLABS_VOICE_RANDOM", "false"
-    ).strip().lower() in {"1", "true", "yes", "on"}
-
-    if random_enabled:
-        from ai.voices import random_voice_id
-
-        return random_voice_id()
-
-    override = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
-    if override:
-        return "".join(ch for ch in override if ch.isascii() and not ch.isspace())
-    if scenario.tts_voice_id:
-        return scenario.tts_voice_id
-    return _require_env("ELEVENLABS_VOICE_ID")
-
-
-def _tts_stability(scenario) -> float:
-    raw = os.getenv("ELEVENLABS_STABILITY", "").strip()
-    if raw:
-        return float(raw)
-    return scenario.tts_stability
-
-
-def _tts_style(scenario) -> float:
-    """Voice style exaggeration. 0 (ElevenLabs' default) reads as a flat script."""
-    raw = os.getenv("ELEVENLABS_STYLE", "").strip()
-    if raw:
-        return float(raw)
-    return getattr(scenario, "tts_style", 0.15)
-
-
-def _tts_speed(scenario) -> float:
-    """Slightly under 1.0 so the caller doesn't sound rushed."""
-    raw = os.getenv("ELEVENLABS_SPEED", "").strip()
-    if raw:
-        return float(raw)
-    return getattr(scenario, "tts_speed", 0.94)
-
-
-def phone_system_prompt(scenario) -> str:
-    """Append the phone-transport rules to a scenario's own prompt.
-
-    Kept short on purpose: style and output-length rules already live in the
-    scenario prompt (ai/scenarios/playbook.py), and repeating them here only
-    grows the prefix every live turn has to re-read.
-    """
-    return (
-        f"{scenario.system_prompt}\n\n"
-        "[전화 연결]\n"
-        f"- 인사말은 이미 나갔다: {scenario.opening_line}\n"
-        "- 인사말을 다시 하지 않는다. 상대 말에 이어서 본론만 말한다.\n"
-        "- 한 응답은 문장 둘까지다. 물러서거나 허락을 구하지 않는다.\n"
-        "- 상대가 안 들린다고 하면 짧게 이어서 본론을 다시 말한다.\n"
-        f"- 상대 발화 기준으로 최대 {scenario.max_turns}번이다.\n"
-        "- 상대가 끊겠다고 한 첫 번째는 붙잡고 본론을 이어 간다. 두 번째에 hang_up 한다.\n"
-        "- 다른 번호로 전화를 돌리지 않는다."
-    )
-
-
-def _script_mode() -> str:
-    """How the script call mode runs (ai/scenarios/script.py).
-
-    off    -- every turn goes to the live LLM (plus the reflex table)
-    shadow -- same, but each turn logs what the script WOULD have said; this
-              is the log `python -m ai.script_eval --logs` turns into a hit rate
-    on     -- turns the script is sure about are answered from pre-written,
-              pre-synthesized lines; everything else goes to the live LLM
-    """
-    mode = os.getenv("CALL_SCRIPT_MODE", "shadow").strip().lower()
-    return mode if mode in {"off", "shadow", "on"} else "shadow"
-
-
-def _prerender_spec(scenario, voice_id: str):
-    from ai.prerender import voice_spec_for
-
-    return voice_spec_for(scenario, voice_id)
-
-
-# Keeps background prerender tasks referenced until they finish; asyncio only
-# holds weak references to tasks.
-_background_tasks: set[asyncio.Task] = set()
-
-
-def _start_prerender(scenario, voice_id: str) -> None:
-    """Synthesize this call's fixed lines while the phone rings.
-
-    Best effort and off the critical path: a line that is not ready when its
-    turn comes is spoken through the live TTS as before.
-    """
-    if os.getenv("CALL_PRERENDER", "true").strip().lower() in {"0", "false", "no", "off"}:
-        return
-    from ai.prerender import ensure_lines, scenario_lines
-
-    lines = scenario_lines(scenario, include_script=_script_mode() == "on")
-    spec = _prerender_spec(scenario, voice_id)
-    try:
-        task = asyncio.get_running_loop().create_task(ensure_lines(spec, lines))
-    except RuntimeError:
-        return  # no running loop (sync caller); nothing to warm
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-
-def build_pipeline_session(scenario, *, voice_id: str | None = None):
-    try:
-        from clawops.agent.pipeline import (
-            DeepgramSTT,
-            ElevenLabsTTS,
-        )
-        from app.training.deepgram_stt import PhoneDeepgramSTT
-        from app.training.gemini_llm import PhoneGeminiLLM
-        from app.training.openai_llm import PhoneOpenAILLM
-        from app.training.pipeline_session import PhonePipelineSession
-    except ImportError as exc:
-        raise CallConfigurationError(
-            "ClawOps pipeline extras are missing; rebuild with "
-            "clawops[agent,openai,gemini,deepgram,elevenlabs]"
-        ) from exc
-    from ai.harness import CallMonitor, GuardedLLM
-    from ai.prerender import default_cache
-    from ai.scenarios.script import ScriptRouter
-
-    voice_id = voice_id or _tts_voice_id(scenario)
-    monitor = CallMonitor(
-        scenario_id=getattr(scenario, "id", ""),
-        hangup_line=getattr(scenario, "hangup_line", ""),
-    )
-    spec = _prerender_spec(scenario, voice_id)
-    cache = default_cache()
-
-    # Built separately so we can see which naturalness settings the installed
-    # ClawOps ElevenLabsTTS actually accepts. _supported_kwargs() drops unknown
-    # ones silently, which would otherwise make a voice-tuning change look
-    # applied when it never reached ElevenLabs.
-    # eleven_flash_v2_5 is ElevenLabs' lowest-latency Korean-capable model.
-    # The value itself lives in ai/.env, which app/main.py also loads, so both
-    # the phone pipeline and the local harness read one copy. This default is
-    # only the floor for deployments that ship no .env at all.
-    tts_requested = dict(
-        voice_id=voice_id,
-        model=os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5").strip()
-        or "eleven_flash_v2_5",
-        stability=_tts_stability(scenario),
-        similarity_boost=scenario.tts_similarity_boost,
-        # style / use_speaker_boost / speed are NOT in the installed
-        # ElevenLabsTTS signature (verified against clawops 0.46.1), so they
-        # are sent only so the warning below names them if a future build
-        # starts accepting them. Scenario tts_style / tts_speed currently
-        # affect the local ai/ pipeline only.
-        style=_tts_style(scenario),
-        use_speaker_boost=True,
-        speed=_tts_speed(scenario),
-        output_format=os.getenv("ELEVENLABS_OUTPUT_FORMAT", "pcm_24000").strip()
-        or "pcm_24000",
-        language_code="ko",
-    )
-    tts_kwargs = _supported_kwargs(ElevenLabsTTS, **tts_requested)
-    dropped = sorted(set(tts_requested) - set(tts_kwargs))
-    if dropped:
-        logger.warning(
-            "ElevenLabsTTS ignored unsupported voice settings: %s "
-            "(the installed clawops build does not accept them)",
-            ", ".join(dropped),
-        )
-
-    session_kwargs = _supported_kwargs(
-        PhonePipelineSession,
-        system_prompt=phone_system_prompt(scenario),
-        stt=PhoneDeepgramSTT(
-            **_supported_kwargs(
-                DeepgramSTT,
-                language=os.getenv("DEEPGRAM_LANGUAGE", "ko").strip() or "ko",
-                model=os.getenv("DEEPGRAM_MODEL", "nova-2").strip() or "nova-2",
-                # This is the real handle on dead air. A normal turn ends on
-                # Deepgram's speech_final, which fires after this much silence
-                # (see UtteranceAssembler in app/training/deepgram_stt.py), so
-                # perceived latency is floored here -- not at utterance_end_ms.
-                # 300 (was 400) takes 100 ms off every turn; a slow speaker's
-                # mid-sentence pause is folded back in by continues_previous_turn,
-                # so cutting a little early costs a merged turn, not a lost one.
-                endpointing=int(os.getenv("STT_ENDPOINTING_MS", "300")),
-                # Backstop only, for the case where Deepgram never sends
-                # speech_final. It bounds the worst turn, not the typical one.
-                utterance_end_ms=int(os.getenv("STT_UTTERANCE_END_MS", "1000")),
-            )
-        ),
-        # Every sentence the model says passes the runtime harness first
-        # (ai/harness.py): persona breaks, real institution names and requests
-        # for secrets are dropped before TTS, whatever the prompt achieved.
-        llm=GuardedLLM(_build_call_llm(PhoneGeminiLLM, PhoneOpenAILLM), monitor=monitor),
-        tts=ElevenLabsTTS(**tts_kwargs),
-        greeting=True,
-        opening_line=scenario.opening_line,
-        max_turns=scenario.max_turns,
-        quick_replies=getattr(scenario, "quick_replies", ()),
-        hangup_line=getattr(scenario, "hangup_line", ""),
-        reflex_budget=int(os.getenv("CALL_REFLEX_BUDGET", "3")),
-        stall_line=os.getenv("CALL_STALL_LINE", "").strip(),
-        monitor=monitor,
-        script_router=ScriptRouter.for_scenario(scenario),
-        script_mode=_script_mode(),
-        prerendered=lambda text: cache.get(spec, text),
-        scenario_id=getattr(scenario, "id", ""),
-    )
-    return PhonePipelineSession(**session_kwargs)
-
-
-def _call_max_tokens(provider: str) -> int:
-    """Output cap for one live turn.
-
-    A reply is two short Korean sentences, roughly 40-60 tokens, so 120 is
-    ample for OpenAI and keeps a stray long answer from running for seconds
-    of TTS.
-
-    Gemini gets a much higher ceiling on purpose. Gemini counts hidden
-    thinking tokens against the output budget, so a tight cap can be spent
-    entirely on reasoning and return empty content -- which on a phone call
-    is dead silence, not a slow answer ("sometimes empty content" was
-    observed on non-lite models).
-    Length is already controlled by the prompt rule in
-    ai/scenarios/playbook.py ("짧은 문장 두 개까지"), so the high cap costs
-    nothing in practice. Drop it once you have confirmed from usage metadata
-    that thinking really is off.
-    """
-    default = "120" if provider == "openai" else "512"
-    return int(os.getenv("CALL_MAX_TOKENS", default))
-
-
-def _gemini_thinking_kwargs(cls) -> dict:
-    """Ask Gemini to skip hidden reasoning tokens before the first visible one.
-
-    Non-lite Gemini flash models spend hundreds of hidden reasoning tokens
-    before emitting anything, which is dead air on a phone call. Client builds
-    spell the knob differently, so pick whichever name `cls` names explicitly
-    and send nothing otherwise -- a wrong keyword forwarded through a **kwargs
-    passthrough would fail the whole call, which is far worse than being slow.
-    Set GEMINI_THINKING_BUDGET to an empty string to stop sending it.
-    """
-    budget = os.getenv("GEMINI_THINKING_BUDGET", "0").strip()
-    if not budget:
-        return {}
-    accepted = inspect.signature(cls).parameters
-    if "thinking_budget" in accepted:
-        return {"thinking_budget": int(budget)}
-    if "reasoning_effort" in accepted:
-        return {"reasoning_effort": "none" if int(budget) == 0 else "low"}
+def start_training_calls(session_id: str, phone_number: str) -> None:
+    """HTTP 요청을 붙잡지 않도록 발신은 백그라운드 스레드에서 한다."""
     logger.info(
-        "%s exposes no thinking-budget setting; Gemini may spend hidden "
-        "reasoning tokens before the first spoken word",
-        cls.__name__,
+        "Starting training call session=%s phone=%s",
+        session_id,
+        mask_phone_number(phone_number),
     )
-    return {}
+    update_call_status(session_id, "waiting")
+    Thread(target=_run_training_call, args=(session_id,), daemon=True).start()
 
 
-def _construct_logged(cls, requested: dict):
-    """Instantiate `cls`, warning about any kwarg the installed build drops."""
-    kwargs = _supported_kwargs(cls, **requested)
-    dropped = sorted(set(requested) - set(kwargs))
-    if dropped:
-        logger.warning(
-            "%s ignored unsupported settings: %s "
-            "(the installed clawops build does not accept them)",
-            cls.__name__,
-            ", ".join(dropped),
-        )
-    return cls(**kwargs)
-
-
-def _build_gemini_llm(gemini_cls):
-    requested = dict(
-        api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
-        model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-        or "gemini-3.5-flash-lite",
-        temperature=0.75,
-        max_tokens=_call_max_tokens("gemini"),
-        # Gemini returns 503 UNAVAILABLE often enough that a single try
-        # loses the turn. See app/training/gemini_llm.py.
-        attempts=int(os.getenv("GEMINI_ATTEMPTS", "2")),
-        fallback_models=tuple(
-            m.strip()
-            for m in os.getenv("GEMINI_FALLBACK_MODELS", "").split(",")
-            if m.strip()
-        ),
-        **_gemini_thinking_kwargs(gemini_cls),
-    )
-    return _construct_logged(gemini_cls, requested)
-
-
-def _build_openai_llm(openai_cls):
-    requested = dict(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
-        # Raised from 0.55. At the old value the caller reused the same
-        # phrasing turn after turn, which reads as scripted. This matches
-        # ai/llm_stream.py's default so the phone pipeline and the local
-        # ai/ pipeline behave the same way.
-        temperature=0.75,
-        max_tokens=_call_max_tokens("openai"),
-    )
-    return _construct_logged(openai_cls, requested)
-
-
-def _build_call_llm(gemini_cls, openai_cls):
-    """Construct the in-call LLM: CALL_LLM_PROVIDER picks the primary, and the
-    other provider becomes an automatic fallback for one live turn if its own
-    API key is also configured.
-
-    Without this, an exhausted or down primary key means every turn falls
-    through to PhonePipelineSession's stall line -- the trainee hears "잠시만
-    기다려 주십시오" instead of an answer, for the whole call. With both keys
-    present, one provider failing outright still lets the call continue on
-    the other. See app/training/fallback_llm.py for the switch-only-before-
-    the-first-token rule that keeps this from repeating a half-spoken reply.
-    """
-    from app.training.fallback_llm import FallbackLLM
-
-    if _call_llm_provider() == "gemini":
-        primary, primary_label = _build_gemini_llm(gemini_cls), "Gemini"
-        secondary_key, secondary_label = "OPENAI_API_KEY", "OpenAI"
-        build_secondary = lambda: _build_openai_llm(openai_cls)
-    else:
-        primary, primary_label = _build_openai_llm(openai_cls), "OpenAI"
-        secondary_key, secondary_label = "GEMINI_API_KEY", "Gemini"
-        build_secondary = lambda: _build_gemini_llm(gemini_cls)
-
-    if not os.getenv(secondary_key, "").strip():
-        return primary
-
-    return FallbackLLM(
-        primary,
-        build_secondary(),
-        primary_label=primary_label,
-        secondary_label=secondary_label,
-    )
-
-
-def _make_clawops_agent(from_number: str, scenario):
+def _run_training_call(session_id: str) -> None:
+    if not _outbound_lock.acquire(timeout=20):
+        update_call_status(session_id, "failed")
+        _retry_scheduled_training(session_id, "outbound_lock_timeout")
+        logger.warning("Previous outbound call still starting; skip session=%s", session_id)
+        return
     try:
-        from clawops.agent import BuiltinTool, ClawOpsAgent
-    except ImportError as exc:
-        raise CallConfigurationError(
-            "ClawOps Agent SDK is not installed; rebuild the backend image"
-        ) from exc
-
-    # Resolved once per call: with ELEVENLABS_VOICE_RANDOM the session and the
-    # prerendered lines must still agree on who is speaking.
-    voice_id = _tts_voice_id(scenario)
-    _start_prerender(scenario, voice_id)
-    kwargs = {
-        "from_": from_number,
-        "builtin_tools": [BuiltinTool.HANG_UP],
-    }
-    if "session_factory" in inspect.signature(ClawOpsAgent).parameters:
-        kwargs["session_factory"] = lambda: build_pipeline_session(scenario, voice_id=voice_id)
-    else:
-        kwargs["session"] = build_pipeline_session(scenario, voice_id=voice_id)
-    return ClawOpsAgent(**_supported_kwargs(ClawOpsAgent, **kwargs))
+        asyncio.run(_start_call(session_id))
+    except Exception:
+        update_call_status(session_id, "failed")
+        _retry_scheduled_training(session_id, "call_start_failed")
+        logger.exception("Failed to start call: session_id=%s", session_id)
+    finally:
+        _outbound_lock.release()
 
 
-def _call_agent_mode() -> str:
-    """Which engine drives the live conversation.
+async def _start_call(session_id: str) -> None:
+    """ClawOps 매니지드 에이전트로 발신한다. 이후 진행은 상태·녹취록 웹훅이 맡는다."""
+    session = get_session(session_id)
+    if session is None:
+        raise CallServiceError(f"session not found: {session_id}")
+    if session.callStatus == "calling":
+        raise CallServiceError(f"call already in progress: {session_id}")
+    phone_number = get_phone_number(session_id)
+    if phone_number is None:
+        raise CallServiceError(f"no phone number: {session_id}")
 
-    'managed' (default) hands the whole call to a ClawOps console agent: the
-    prompt, the knowledge and the voice all live in the console, and ClawOps
-    runs the conversation server-side. Nothing from ai/scenarios or
-    app/training/ is involved.
-
-    The other two keep the in-process Agent SDK paths reachable. 'realtime'
-    lets a provider realtime model answer with the scenario prompt from
-    ai/scenarios; 'pipeline' runs the in-house Deepgram + LLM + ElevenLabs
-    chain in app/training/. Both stay in place so switching back is one
-    variable, not a rewrite.
-    """
-    mode = os.getenv("CALL_AGENT_MODE", "managed").strip().lower() or "managed"
-    if mode not in {"managed", "realtime", "pipeline"}:
-        logger.warning("Unknown CALL_AGENT_MODE=%s; using managed", mode)
-        return "managed"
-    return mode
-
-
-def _pipeline_configured() -> bool:
-    return all(
-        os.getenv(name, "").strip()
-        for name in ("DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY")
-    )
-
-
-def _make_call_agent(from_number: str, scenario):
-    """Build an in-process Agent SDK agent. Managed mode never gets here."""
-    if _call_agent_mode() != "pipeline":
-        return _make_realtime_agent(from_number, scenario)
-    if not _pipeline_configured():
-        logger.warning(
-            "CALL_AGENT_MODE=pipeline needs DEEPGRAM_API_KEY and "
-            "ELEVENLABS_API_KEY; using the realtime agent instead"
-        )
-        return _make_realtime_agent(from_number, scenario)
-    return _make_clawops_agent(from_number, scenario)
-
-
-# ClawOps callback *events*, not call statuses (docs: create-call,
-# StatusCallbackEvent). "answered" fires when the trainee picks up, which
-# starts the mid-call SMS timer; "completed" covers every terminal status.
-# Status names such as "in-progress" are not events and were silently
-# ignored, so only the hang-up callback ever arrived.
-_STATUS_CALLBACK_EVENTS = "ringing answered completed"
-_MISSED_STATUSES = {"no-answer", "busy", "rejected", "canceled"}
-_RINGING_STATUSES = {"queued", "ringing", "in-progress"}
-
-
-def _status_callback_url() -> str:
-    base = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
-    if not base:
-        logger.warning(
-            "PUBLIC_BASE_URL is not set, so ClawOps has nowhere to report call "
-            "status: sessions stay at 'calling' and no unannounced training is "
-            "queued once the call ends"
-        )
-        return ""
-    return f"{base}/v1/webhooks/clawops/status"
-
-
-async def _start_managed_call(phone_number: str, from_number: str, scenario):
-    """Hand the call to the ClawOps agent that ai/managed_agent.py provisions.
-
-    The agents are created by `python -m ai.managed_agent sync` and named
-    spc-<scenario id>-<variant>, so they are resolved by name rather than by
-    a pasted id. They carry only the shared rules; this call's scenario rides
-    along in the CallContext, which is why editing ai/scenarios/library.py
-    takes effect without re-syncing.
-    """
-    from app.services.report_service import _clawops_calls
+    _require_env("CLAWOPS_API_KEY")
+    _require_env("CLAWOPS_ACCOUNT_ID")
+    from_number = _outbound_phone_number(session.currentTrainingType)
+    scenario = get_runtime_scenario(session.currentTrainingType)
 
     ensure_ai_importable()
     from ai.managed_agent import build_call_context, pick_variant, resolve_agent_id
 
     variant = pick_variant()
     agent_id = await asyncio.to_thread(resolve_agent_id, scenario.id, variant)
-    kwargs = {
+    request = {
         "to": phone_number,
         "from_": from_number,
         "agent_id": agent_id,
@@ -572,72 +99,84 @@ async def _start_managed_call(phone_number: str, from_number: str, scenario):
     }
     callback = _status_callback_url()
     if callback:
-        kwargs["status_callback"] = callback
-        kwargs["status_callback_event"] = _STATUS_CALLBACK_EVENTS
+        request["status_callback"] = callback
+        request["status_callback_event"] = _STATUS_CALLBACK_EVENTS
 
-    calls = _clawops_calls()
+    calls = report_service._clawops_calls()
+    call = await asyncio.to_thread(lambda: calls.create(**request))
+    bind_call(session_id, call.call_id)
+    attach_call(session_id, call.call_id, scenario_id=scenario.id, agent_variant=variant)
     logger.info(
-        "Call agent: ClawOps managed scenario=%s variant=%s agent=%s",
+        "Started call session=%s call_id=%s scenario=%s variant=%s",
+        session_id,
+        call.call_id,
         scenario.id,
         variant,
-        agent_id,
     )
-    call = await asyncio.to_thread(lambda: calls.create(**kwargs))
-    return call, variant
 
 
-def _scenario_id_for_call(call_id: str) -> str | None:
-    """관리형 통화가 실제로 어떤 시나리오로 걸렸는지 (Call에 저장된 값)."""
-    with SessionLocal() as db:
-        return db.scalar(
-            select(Call.scenario_id).where(Call.clawops_call_id == call_id)
-        )
+def _status_callback_url() -> str:
+    base = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        logger.warning("PUBLIC_BASE_URL is not set; ClawOps cannot report call status")
+        return ""
+    return f"{base}/v1/webhooks/clawops/status"
 
 
-async def _dispatch_web_training_link(
-    session_id: str, scenario_id: str | None
-) -> None:
-    """웹 훈련 링크를 문자로 보낸다(통화 중 타이머 또는 통화 종료 시).
+async def handle_call_status_event(call_id: str, *, callback_status: str = "") -> None:
+    """상태 웹훅 처리. 웹훅 본문 형식은 문서화돼 있지 않아 상태는 API로 다시 조회한다."""
+    session_id = session_id_for_call(call_id)
+    if session_id is None:
+        logger.info("No training session for ClawOps call_id=%s", call_id)
+        return
 
-    실제 수법("전화로 속인 뒤 문자로 유도")을 그대로 재현하는 단계. 가온 포털을
-    쓰는 investigation_unit 시나리오에만 해당하며(판단은 발송기 쪽), 발송 실패가
-    통화 처리를 막지 않도록 예외는 삼킨다. 세션당 한 번만 나간다.
-    """
-    try:
-        from app.services.web_training_service import dispatch_training_link
+    call = await asyncio.to_thread(lambda: report_service._clawops_calls().get(call_id))
+    status_name = (getattr(call, "status", "") or "").strip()
 
-        await dispatch_training_link(session_id, scenario_id)
-    except Exception:
-        logger.exception(
-            "Web training link dispatch failed: session_id=%s", session_id
-        )
+    if status_name in _RINGING_STATUSES:
+        update_call_status(session_id, "calling")
+        # answered 직후 조회하면 API가 아직 in-progress가 아닐 수 있어 웹훅 값도 본다.
+        if "in-progress" in {status_name, callback_status}:
+            _schedule_mid_call_link(call_id, session_id)
+        return
 
+    if status_name == "completed":
+        update_call_status(session_id, "completed")
+        _complete_call(call_id)
+        _complete_scheduled_training(session_id)
+        try:
+            from app.services.training_scheduler import schedule_unannounced_training
 
-# Calls whose mid-call SMS timer is already set; ClawOps may repeat a status.
-_mid_call_link_calls: set[str] = set()
+            schedule_unannounced_training(session_id)
+        except Exception:
+            logger.exception("Unannounced training scheduling failed: session_id=%s", session_id)
+        try:
+            await request_clawops_transcript(call_id)
+        except Exception:
+            logger.exception("ClawOps transcript request failed: session_id=%s", session_id)
+        await _dispatch_web_training_link(session_id, _scenario_id_for_call(call_id))
+        return
 
+    if status_name in _MISSED_STATUSES:
+        update_call_status(session_id, "missed")
+        _fail_call(call_id, status_name)
+        update_report_status(session_id, "none")
+        _retry_scheduled_training(session_id, f"call_{status_name}")
+        logger.info("Training call missed session=%s status=%s", session_id, status_name)
+        return
 
-def _mid_call_link_delay(scenario_id: str | None) -> int | None:
-    """Seconds after the call connects to text the link, or None for no link.
-
-    The agent says "I just texted you the link" partway into the call
-    (ai/scenarios/portal_link.py), so the SMS goes out on a timer from the
-    moment the call is answered rather than after hang-up.
-    MID_CALL_SMS_DELAY_SEC overrides the scenario's value.
-    """
-    if not scenario_id:
-        return None
-    ensure_ai_importable()
-    from ai.scenarios.portal_link import link_for
-
-    link = link_for(scenario_id)
-    if link is None:
-        return None
-    override = os.getenv("MID_CALL_SMS_DELAY_SEC", "").strip()
-    return max(0, int(override)) if override else link.send_after_seconds
+    cause = getattr(call, "hangup_cause", None)
+    update_call_status(session_id, "failed")
+    _fail_call(call_id, cause or status_name or "unknown")
+    update_report_status(session_id, "none")
+    _retry_scheduled_training(session_id, "call_failed")
+    logger.warning(
+        "Training call failed session=%s status=%s cause=%s", session_id, status_name, cause
+    )
 
 
 def _schedule_mid_call_link(call_id: str, session_id: str) -> None:
+    """통화가 연결되면 시나리오에 정해진 시간 뒤에 웹 훈련 링크 문자를 보낸다."""
     if call_id in _mid_call_link_calls:
         return
     scenario_id = _scenario_id_for_call(call_id)
@@ -653,14 +192,7 @@ def _schedule_mid_call_link(call_id: str, session_id: str) -> None:
     async def send_later() -> None:
         try:
             await asyncio.sleep(delay)
-            logger.info(
-                "Sending mid-call training link session=%s call_id=%s after=%ss",
-                session_id,
-                call_id,
-                delay,
-            )
-            # Sends once per session: the hang-up dispatch below finds the
-            # link and skips, and still covers a call that ends before this.
+            logger.info("Sending mid-call training link session=%s after=%ss", session_id, delay)
             await _dispatch_web_training_link(session_id, scenario_id)
         finally:
             _mid_call_link_calls.discard(call_id)
@@ -670,367 +202,70 @@ def _schedule_mid_call_link(call_id: str, session_id: str) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-async def handle_call_status_event(
-    call_id: str, *, callback_status: str = ""
-) -> None:
-    """Managed-mode replacement for _monitor_call.
+def _mid_call_link_delay(scenario_id: str | None) -> int | None:
+    """링크 문자를 보낼 시점(연결 후 초). 링크가 없는 시나리오는 None."""
+    if not scenario_id:
+        return None
+    ensure_ai_importable()
+    from ai.scenarios.portal_link import link_for
 
-    The callback body only says which call changed, so the status is read back
-    from the API, whose Call model is typed and versioned -- the webhook
-    payload shape is not.
-
-    Unlike _monitor_call this cannot tell a connected-but-silent call from a
-    real conversation: the turns arrive later on the transcript webhook, not
-    by the time the call ends. A connected call is therefore 'completed' here,
-    and the transcript webhook settles the report.
-    """
-    session_id = session_id_for_call(call_id)
-    if session_id is None:
-        logger.info("No training session for ClawOps call_id=%s", call_id)
-        return
-
-    from app.services.report_service import _clawops_calls
-
-    call = await asyncio.to_thread(lambda: _clawops_calls().get(call_id))
-    status_name = (getattr(call, "status", "") or "").strip()
-
-    if status_name in _RINGING_STATUSES:
-        update_call_status(session_id, "calling")
-        # The "answered" callback can be read back before the API shows
-        # in-progress, so the status in the callback body counts too.
-        if "in-progress" in {status_name, callback_status}:
-            _schedule_mid_call_link(call_id, session_id)
-        return
-
-    if status_name == "completed":
-        update_call_status(session_id, "completed")
-        _complete_call(call_id)
-        _complete_scheduled_training(session_id)
-        try:
-            from app.services.training_scheduler import (
-                schedule_unannounced_training,
-            )
-
-            schedule_unannounced_training(session_id)
-        except Exception:
-            logger.exception(
-                "Unannounced training scheduling failed: session_id=%s",
-                session_id,
-            )
-        try:
-            await request_clawops_transcript(call_id)
-        except Exception:
-            logger.exception(
-                "ClawOps transcript request failed: session_id=%s",
-                session_id,
-            )
-        await _dispatch_web_training_link(
-            session_id, _scenario_id_for_call(call_id)
-        )
-        return
-
-    if status_name in _MISSED_STATUSES:
-        update_call_status(session_id, "missed")
-        _fail_call(call_id, status_name)
-        update_report_status(session_id, "none")
-        _retry_scheduled_training(session_id, f"call_{status_name}")
-        logger.info(
-            "Training call missed session=%s status=%s", session_id, status_name
-        )
-        return
-
-    update_call_status(session_id, "failed")
-    _fail_call(call_id, getattr(call, "hangup_cause", None) or status_name or "unknown")
-    update_report_status(session_id, "none")
-    _retry_scheduled_training(session_id, "call_failed")
-    logger.warning(
-        "Training call failed session=%s status=%s cause=%s",
-        session_id,
-        status_name,
-        getattr(call, "hangup_cause", None),
-    )
+    link = link_for(scenario_id)
+    if link is None:
+        return None
+    override = os.getenv("MID_CALL_SMS_DELAY_SEC", "").strip()
+    return max(0, int(override)) if override else link.send_after_seconds
 
 
-def _make_realtime_agent(from_number: str, scenario):
-    provider = _call_llm_provider()
+async def _dispatch_web_training_link(session_id: str, scenario_id: str | None) -> None:
+    """세션당 한 번만 발송된다. 발송 실패가 통화 처리를 막지 않도록 예외는 기록만 한다."""
     try:
-        if provider == "gemini":
-            from clawops.agent import ClawOpsAgent, GeminiRealtime
-        else:
-            from clawops.agent import ClawOpsAgent, OpenAIRealtime
-    except ImportError as exc:
-        raise CallConfigurationError(
-            "ClawOps Realtime dependencies are missing; rebuild the backend image "
-            "with clawops[agent,openai,gemini]"
-        ) from exc
+        from app.services.web_training_service import dispatch_training_link
 
-    if provider == "gemini":
-        session_cls = GeminiRealtime
-        requested = dict(
-            api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
-            system_prompt=scenario.system_prompt,
-            voice=os.getenv("CLAWOPS_GEMINI_VOICE", "Kore"),
-            language="ko",
-        )
-    else:
-        session_cls = OpenAIRealtime
-        requested = dict(
-            system_prompt=scenario.system_prompt,
-            voice=os.getenv("CLAWOPS_VOICE", "marin"),
-            language="ko",
-        )
-
-    # Same trap as ElevenLabsTTS above: _supported_kwargs() drops what the
-    # installed build does not accept, and a silently dropped `voice` is a
-    # call that goes out in the wrong voice with nothing in the log to say so.
-    kwargs = _supported_kwargs(session_cls, **requested)
-    dropped = sorted(set(requested) - set(kwargs))
-    if dropped:
-        logger.warning(
-            "%s ignored unsupported settings: %s "
-            "(the installed clawops build does not accept them)",
-            session_cls.__name__,
-            ", ".join(dropped),
-        )
-    logger.info(
-        "Call agent: ClawOps %s Realtime voice=%s",
-        provider,
-        requested.get("voice"),
-    )
-    return ClawOpsAgent(from_=from_number, session=session_cls(**kwargs))
-
-
-async def start_outbound_call(session_id: str) -> str:
-    agent, call_session, scenario = await _create_outbound_call(session_id)
-    if agent is not None:
-        asyncio.create_task(_monitor_call(session_id, agent, call_session, scenario))
-    return call_session.call_id
-
-
-async def _create_outbound_call(session_id: str):
-    session = get_session(session_id)
-    if session is None:
-        raise SessionNotFoundError
-    if session.callStatus == "calling":
-        raise CallInProgressError
-
-    phone_number = get_phone_number(session_id)
-    if phone_number is None:
-        raise PhoneNotRegisteredError
-
-    _require_env("CLAWOPS_API_KEY")
-    _require_env("CLAWOPS_ACCOUNT_ID")
-    from_number = _outbound_phone_number(session.currentTrainingType)
-
-    managed = _call_agent_mode() == "managed"
-    if not managed:
-        # Managed calls run the model on ClawOps' side, so our own LLM key is
-        # only needed by the in-process paths.
-        _require_call_llm_key()
-
-    try:
-        # Instant: a fixed playbook is picked in process.
-        scenario = await get_runtime_scenario(session.currentTrainingType)
+        await dispatch_training_link(session_id, scenario_id)
     except Exception:
-        logger.exception("Scenario selection failed; using the default scenario")
-        try:
-            from app.training.scenarios import get_call_scenario
-
-            scenario = get_call_scenario()
-        except Exception as fallback_exc:
-            raise CallConfigurationError(str(fallback_exc)) from fallback_exc
-
-    if managed:
-        # ClawOps runs the conversation, so there is no agent object to monitor
-        # or disconnect -- the status and transcript webhooks carry the call
-        # from here. A missing agent (never synced) is not fatal: fall through
-        # to the in-process path so the call still goes out.
-        try:
-            call, variant = await _start_managed_call(
-                phone_number, from_number, scenario
-            )
-        except LookupError as exc:
-            logger.warning("%s; using the in-process agent for this call", exc)
-            _require_call_llm_key()  # skipped above; the fallback path needs it
-        else:
-            bind_call(session_id, call.call_id)
-            attach_call(
-                session_id,
-                call.call_id,
-                scenario_id=scenario.id,
-                agent_variant=variant,
-            )
-            logger.info(
-                "Started managed call session=%s call_id=%s",
-                session_id,
-                call.call_id,
-            )
-            return None, call, scenario
-
-    logger.info(
-        "Starting pipeline call session=%s scenario=%s",
-        session_id,
-        scenario.id,
-    )
-
-    agent = _make_call_agent(from_number, scenario)
-    register_transcript_listener(agent, session_id)
-
-    try:
-        call_session = await agent.call(phone_number, timeout=30)
-    except TimeoutError:
-        await agent.disconnect()
-        raise CallConfigurationError(
-            "지금은 전화를 걸 수 없습니다. 잠시 후 다시 시도해 주세요."
-        ) from None
-    except Exception as exc:
-        await agent.disconnect()
-        message = str(exc)
-        if "Concurrent call limit" in message or "429" in message:
-            logger.error("ClawOps outbound rejected: %s", message)
-            raise CallConfigurationError(
-                "지금은 통화 연결이 혼잡합니다. 잠시 후 다시 시도해 주세요."
-            ) from None
-        raise
-
-    bind_call(session_id, call_session.call_id)
-    attach_call(
-        session_id,
-        call_session.call_id,
-        scenario_id=scenario.id,
-        # Not one of ai/managed_agent.py's VARIANTS: this call was spoken by
-        # the in-process Agent SDK, so the comparison should not count it as
-        # either managed variant.
-        agent_variant="sdk",
-    )
-    return agent, call_session, scenario
+        logger.exception("Web training link dispatch failed: session_id=%s", session_id)
 
 
-async def _monitor_call(session_id: str, agent, call_session, scenario=None) -> None:
-    try:
-        await call_session.wait()
-        if trainee_spoke(session_id, call_session.call_id):
-            update_call_status(session_id, "completed")
-            _complete_call(call_session.call_id)
-            _complete_scheduled_training(session_id)
-            try:
-                await asyncio.wait_for(
-                    build_draft_report(session_id, scenario=scenario), timeout=20
-                )
-            except Exception:
-                logger.exception("Draft report failed: session_id=%s", session_id)
-            else:
-                try:
-                    from app.services.training_scheduler import (
-                        schedule_unannounced_training,
-                    )
-
-                    schedule_unannounced_training(session_id)
-                except Exception:
-                    logger.exception(
-                        "Unannounced training scheduling failed: session_id=%s",
-                        session_id,
-                    )
-            try:
-                await request_clawops_transcript(call_session.call_id)
-            except Exception:
-                logger.exception(
-                    "ClawOps transcript request failed: session_id=%s",
-                    session_id,
-                )
-            await _dispatch_web_training_link(
-                session_id, getattr(scenario, "id", None)
-            )
-        elif call_had_transcript(session_id, call_session.call_id):
-            update_call_status(session_id, "silent")
-            _complete_call(call_session.call_id)
-            update_report_status(session_id, "none")
-            _retry_scheduled_training(session_id, "no_trainee_speech")
-            logger.info(
-                "Training call connected without trainee speech session=%s",
-                session_id,
-            )
-        else:
-            update_call_status(session_id, "missed")
-            _fail_call(call_session.call_id, "no_answer")
-            update_report_status(session_id, "none")
-            _retry_scheduled_training(session_id, "call_not_connected")
-            logger.info("Training call missed session=%s", session_id)
-    except Exception:
-        update_call_status(session_id, "failed")
-        _fail_call(call_session.call_id, "ClawOps call failed")
-        _retry_scheduled_training(session_id, "call_monitor_failed")
-        logger.exception("ClawOps call failed: session_id=%s", session_id)
-    finally:
-        await agent.disconnect()
-
-
-def start_training_calls(session_id: str, phone_number: str) -> None:
-    """발신은 백그라운드에서 진행한다. HTTP 요청을 ClawOps 연결에 묶지 않는다."""
-    logger.info(
-        "Starting training calls session=%s phone=%s",
-        session_id,
-        mask_phone_number(phone_number),
-    )
-    update_call_status(session_id, "waiting")
-    Thread(
-        target=_run_training_call,
-        args=(session_id,),
-        daemon=True,
-    ).start()
-
-
-def _run_training_call(session_id: str) -> None:
-    if not _outbound_lock.acquire(timeout=20):
-        update_call_status(session_id, "failed")
-        _retry_scheduled_training(session_id, "outbound_lock_timeout")
-        logger.warning(
-            "Previous ClawOps agent still running; skip session=%s", session_id
-        )
-        return
-    try:
-        asyncio.run(_start_and_monitor_call(session_id))
-    except Exception:
-        update_call_status(session_id, "failed")
-        _retry_scheduled_training(session_id, "call_start_failed")
-        logger.exception("Failed to start ClawOps call: session_id=%s", session_id)
-    finally:
-        _outbound_lock.release()
-
-
-async def _start_and_monitor_call(session_id: str) -> None:
-    agent, call_session, scenario = await _create_outbound_call(session_id)
-    # Managed calls return no agent: ClawOps runs the conversation and the
-    # status webhook (handle_call_status_event) carries the call from here.
-    if agent is not None:
-        await _monitor_call(session_id, agent, call_session, scenario)
+def _scenario_id_for_call(call_id: str) -> str | None:
+    with SessionLocal() as db:
+        return db.scalar(select(Call.scenario_id).where(Call.clawops_call_id == call_id))
 
 
 def _complete_call(clawops_call_id: str) -> None:
-    with SessionLocal.begin() as db:
-        call = db.scalar(
-            select(Call).where(Call.clawops_call_id == clawops_call_id)
-        )
-        if call is not None:
-            call.status = "completed"
-            call.completed_at = datetime.now(timezone.utc)
+    _finish_call(clawops_call_id, "completed")
 
 
 def _fail_call(clawops_call_id: str, reason: str) -> None:
+    _finish_call(clawops_call_id, "failed", reason)
+
+
+def _finish_call(clawops_call_id: str, status: str, reason: str | None = None) -> None:
     with SessionLocal.begin() as db:
-        call = db.scalar(
-            select(Call).where(Call.clawops_call_id == clawops_call_id)
-        )
-        if call is not None:
-            call.status = "failed"
+        call = db.scalar(select(Call).where(Call.clawops_call_id == clawops_call_id))
+        if call is None:
+            return
+        call.status = status
+        call.completed_at = datetime.now(timezone.utc)
+        if reason is not None:
             call.failure_reason = reason
-            call.completed_at = datetime.now(timezone.utc)
 
 
 def _outbound_phone_number(training_type: str) -> str:
     if training_type == "unannounced":
         return _require_env("CLAWOPS_UNANNOUNCED_PHONE_NUMBER")
     return _require_env("CLAWOPS_PHONE_NUMBER")
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise CallServiceError(f"{name} is not set")
+    # 복사해 붙인 키에 섞여 들어온 공백·비ASCII 문자는 인증 실패를 일으켜 걸러 낸다.
+    cleaned = "".join(ch for ch in value if ch.isascii() and not ch.isspace())
+    if cleaned != value:
+        logger.warning("%s had non-ASCII or whitespace characters; they were stripped", name)
+        os.environ[name] = cleaned
+    return cleaned
 
 
 def _complete_scheduled_training(session_id: str) -> None:

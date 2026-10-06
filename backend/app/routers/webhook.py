@@ -30,7 +30,7 @@ _EVENT_REQUIRED_FIELDS = {
 
 
 def _webhook_url(request: Request) -> str:
-    """The URL ClawOps signed. Behind a proxy request.url is not it."""
+    """ClawOps가 서명한 공개 URL. 프록시 뒤에서는 request.url과 다르다."""
     public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
     if public_base_url:
         return f"{public_base_url}{request.url.path}"
@@ -39,12 +39,6 @@ def _webhook_url(request: Request) -> str:
 
 @router.post("/status", status_code=status.HTTP_204_NO_CONTENT)
 async def receive_call_status_webhook(request: Request) -> Response:
-    """Call status for managed-agent calls (CALL_AGENT_MODE=managed).
-
-    Only CallId is read from the body. ClawOps does not publish a schema for
-    this payload, and the call's own API record is typed, so the callback is
-    treated as a trigger and the status is fetched rather than parsed.
-    """
     body = await request.body()
     params = dict(parse_qsl(body.decode(), keep_blank_values=True))
     call_id = params.get("CallId", "").strip()
@@ -81,10 +75,7 @@ async def receive_transcript_webhook(request: Request) -> Response:
     event = params.get("Event", "")
 
     if event not in _EVENT_REQUIRED_FIELDS:
-        # Acknowledge anything we do not act on -- the console's test ping
-        # ("test"), an event subscribed by mistake, one ClawOps adds later.
-        # Answering 400 marks the delivery failed, and enough failures get the
-        # whole webhook disabled, taking transcript.completed down with it.
+        # 처리하지 않는 이벤트(콘솔 테스트 등)도 204로 받는다. 실패 응답이 쌓이면 ClawOps가 웹훅 전체를 끈다.
         logger.info("Ignoring ClawOps event this endpoint does not handle: %s", event)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 

@@ -8,8 +8,6 @@ from alembic.config import Config
 from psycopg import sql
 from sqlalchemy.engine import make_url
 
-# Where _configure_test_database() decided the suite is allowed to write.
-# _engine_is_bound_to_the_test_database() below holds the run to it.
 _TEST_URL = None
 
 
@@ -62,22 +60,11 @@ _configure_test_database()
 
 
 def _target(url) -> tuple:
-    """The part of a URL that decides which database gets written to."""
     return (url.host, url.port, url.database)
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _engine_is_bound_to_the_test_database() -> None:
-    """Stop the run if anything re-pointed the suite at a real database.
-
-    _configure_test_database() runs at import time, but the app is imported
-    later -- during collection -- and it loads backend/.env, which carries the
-    deployed DATABASE_URL. Any future path that puts that value back (an
-    override=True, a stray load_dotenv, a fixture) would have the suite
-    creating and dropping rows in the deployed database with nothing to say
-    so. The engine is what queries actually go through, so check that; the
-    environment matters too, for anything that builds an engine of its own.
-    """
     from app.database import engine
 
     problems = []
@@ -100,14 +87,6 @@ def _engine_is_bound_to_the_test_database() -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def _signup_store_uses_a_fake_redis() -> None:
-    """Point the signup verification store at an in-process Redis.
-
-    The suite already builds a real Postgres database for itself, but a real
-    Redis would be one more service to have running before tests pass -- and
-    in CI, one more to declare. fakeredis implements the commands this store
-    uses (hashes with a TTL, SET NX, GETDEL), so the store is exercised as
-    written rather than mocked out.
-    """
     import fakeredis
 
     from app import phone_verification_store as store

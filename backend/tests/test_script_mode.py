@@ -1,5 +1,3 @@
-"""Script call mode: intent classification, routing, prerender cache, eval."""
-
 import asyncio
 import json
 
@@ -36,7 +34,6 @@ def test_classify_reads_the_common_trainee_moves(utterance, intent):
 
 
 def test_ack_needs_a_whole_word():
-    """"예전에…" and "어디세요" start with the syllables of "예" and "어"."""
     assert classify("예전에 비슷한 전화 받았어요").intent != ACK
     assert classify("어디세요").intent == "who_is_this"
 
@@ -108,9 +105,6 @@ def test_script_lines_are_short_enough_to_be_one_turn():
             assert len(sentences) <= 3, (scenario.id, line)
 
 
-# ── prerender cache ─────────────────────────────────────────────────────────
-
-
 def test_tts_cache_round_trip_and_key_changes_with_settings(tmp_path):
     from ai.prerender import TTSCache, VoiceSpec
 
@@ -118,7 +112,7 @@ def test_tts_cache_round_trip_and_key_changes_with_settings(tmp_path):
     spec = VoiceSpec(voice_id="v", model="m")
     assert cache.get(spec, "안녕하세요.") is None
     cache.put(spec, "안녕하세요.", b"\x7f" * 800)
-    assert TTSCache(tmp_path).get(spec, "안녕하세요.") == b"\x7f" * 800  # from disk
+    assert TTSCache(tmp_path).get(spec, "안녕하세요.") == b"\x7f" * 800
     assert cache.get(VoiceSpec(voice_id="v", model="other"), "안녕하세요.") is None
 
 
@@ -155,9 +149,6 @@ def test_v3_stability_snaps_to_a_preset():
     assert VoiceSpec(voice_id="v", model="eleven_v3", stability=0.3).payload("x")["voice_settings"]["stability"] == 0.5
     assert "language_code" not in VoiceSpec(voice_id="v", model="eleven_v3").payload("x")
     assert VoiceSpec(voice_id="v", model="eleven_flash_v2_5").payload("x")["language_code"] == "ko"
-
-
-# ── hit-rate evaluation ─────────────────────────────────────────────────────
 
 
 def test_script_eval_reads_shadow_logs(tmp_path):

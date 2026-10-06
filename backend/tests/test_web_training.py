@@ -51,20 +51,26 @@ def test_score_maps_events_to_phone_labels():
     report = score_web_events(
         ["link_opened", "identity_submitted", "financial_info_submitted"]
     )
-    # 60 - 15(개인정보) - 25(금융정보) = 20
-    assert report.score == 20
-    assert {b.label for b in report.riskBehaviors} == {"개인정보 제공", "금융정보 제공"}
+    # 60 - 15(링크 접근) - 15(개인정보) - 25(금융정보) = 5
+    assert report.score == 5
+    assert {b.label for b in report.riskBehaviors} == {
+        "링크 접근 의사",
+        "개인정보 제공",
+        "금융정보 제공",
+    }
     assert report.defenseBehaviors == []
 
 
 def test_defensive_events_raise_the_score():
     report = score_web_events(["link_opened", "report_clicked", "left_without_input"])
-    # 60 + 12(신고) + 15(빠른 판단) = 87
-    assert report.score == 87
+    # 60 - 15(링크 접근) + 12(신고) + 15(빠른 판단) = 72
+    assert report.score == 72
 
 
-def test_neutral_only_events_keep_base_score():
-    assert score_web_events(["link_opened"]).score == 60
+def test_opening_the_texted_link_costs_points():
+    report = score_web_events(["link_opened"])
+    assert report.score == 45
+    assert [b.label for b in report.riskBehaviors] == ["링크 접근 의사"]
 
 
 def test_duplicate_events_count_once():
@@ -115,8 +121,8 @@ def test_events_flow_into_the_report():
     ).json()
     web = report["webTraining"]
     assert web is not None
-    # 60 - 15(개인정보) + 12(신고) = 57
-    assert web["score"] == 57
+    # 60 - 15(링크 접근) - 15(개인정보) + 12(신고) = 42
+    assert web["score"] == 42
     assert "identity_submitted" in web["events"]
 
 
@@ -388,3 +394,37 @@ def test_answered_callback_starts_the_timer_before_the_api_catches_up(monkeypatc
 
     assert len(sent) == 1
     assert link_exists(session_id)
+
+
+
+def test_link_actions_stay_out_of_the_phone_report():
+    """The report screen compares the phone score with the link score, so the
+    link is scored only in webTraining, never folded into the call report."""
+    from app.schemas.report import TrainingReport
+    from app.services.report_service import _save_report, bind_call, get_report
+
+    client = _client()
+    session_id, _ = _authenticated_session()
+    bind_call(session_id, "CAphone")
+    _save_report(
+        session_id,
+        TrainingReport(
+            score=75,
+            suspected=False,
+            gaveName=False,
+            triedHangup=True,
+            summary="통화 요약",
+            coaching="코칭",
+            source="clawops",
+        ),
+        status="final",
+    )
+    token = create_link(session_id)
+    client.post(f"/v1/web-training/{token}/events", json={"eventType": "link_opened"})
+
+    report = get_report(session_id)
+
+    assert report.draft is not None and report.draft.score == 75
+    assert report.draft.riskBehaviors == []
+    assert report.webTraining is not None and report.webTraining.score == 45
+    assert [b.label for b in report.webTraining.riskBehaviors] == ["링크 접근 의사"]

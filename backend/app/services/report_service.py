@@ -54,9 +54,11 @@ DEFENSE_SCORE_WEIGHTS = {
 
 # 웹 훈련 이벤트를 전화 훈련과 같은 행동 라벨로 환산한다. 전화에서는 "의사"만
 # 확인되지만 웹에서는 실제 행동이 남으므로, 같은 라벨·같은 가중치를 그대로 쓰되
-# 증거 문구만 웹 맥락으로 표기한다. 매핑이 없는 이벤트(link_opened 등 중립 행동)는
-# 점수에 반영하지 않는다.
+# 증거 문구만 웹 맥락으로 표기한다. 매핑이 없는 이벤트는 점수에 반영하지 않는다.
+# 결과는 webTraining으로 따로 내고, 리포트 화면이 전화 점수와 나란히 비교한다.
 WEB_EVENT_LABELS: dict[str, str] = {
+    # 문자 링크를 연 것 자체가 사기범이 노리는 첫 행동이다.
+    "link_opened": "링크 접근 의사",
     "identity_submitted": "개인정보 제공",
     "case_lookup_submitted": "개인정보 제공",
     "financial_info_submitted": "금융정보 제공",
@@ -65,6 +67,7 @@ WEB_EVENT_LABELS: dict[str, str] = {
     "left_without_input": "전화 종료(빠른 판단)",
 }
 WEB_EVENT_EVIDENCE: dict[str, str] = {
+    "link_opened": "웹 훈련: 문자 링크 열람",
     "identity_submitted": "웹 훈련: 본인인증 정보 제출",
     "case_lookup_submitted": "웹 훈련: 성명으로 사건 조회 시도",
     "financial_info_submitted": "웹 훈련: 금융정보 입력 제출",

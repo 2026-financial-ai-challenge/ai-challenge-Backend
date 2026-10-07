@@ -1,23 +1,7 @@
-"""Reading a ClawOps call transcript: who said what.
+"""녹취록 화자 판정(AI / 훈련자).
 
-ClawOps transcripts label speakers ``speaker_0``, ``speaker_1``... since
-2026-08 (earlier ones used AGENT / CUSTOMER), and the SDK states outright that
-the mapping from speaker to role is not guaranteed. On a managed-agent call the
-transcript is the only record of the conversation, so getting the roles wrong
-would score the trainee on the caller's words.
-
-We do know exactly what the caller was scripted to say: the scenario's opening
-line is spoken verbatim, and the rest of its lines are close paraphrases. So
-the speaker whose words match the script is the agent.
-
-Backend use (docs: 백엔드_통합_안내서_v2.pdf, B4):
-
-    agent = identify_agent_speaker(segments, scenario)
-    if agent is None: ...                     # do not guess
-    for seg in segments:
-        role = "assistant" if seg.speaker == agent else "user"
-
-CLI for the PoC:
+ClawOps 녹취록은 speaker_0, speaker_1로만 나오고 역할 매핑은 보장되지 않는다.
+시나리오 대사, 특히 그대로 말하는 첫 마디와 가장 비슷한 쪽을 AI로 본다.
 
     python -m ai.transcript show <callId> --scenario bank_security_hold
 """
@@ -36,8 +20,7 @@ if __package__ in (None, ""):
 
 __all__ = ["identify_agent_speaker", "label_roles", "segment_speaker", "segment_text"]
 
-# How much better the winner has to match than the runner-up. Below this the
-# two speakers are too alike to call, and a wrong call is worse than none.
+# 점수 차가 이보다 작으면 판정하지 않는다(오판보다 None이 낫다).
 _MIN_OPENING_MATCH = 0.45
 _MIN_MARGIN = 0.12
 
@@ -88,13 +71,11 @@ def _reference_lines(scenario) -> tuple[str, list[str]]:
 
 
 def identify_agent_speaker(segments: Iterable[Any], scenario) -> str | None:
-    """The speaker id that is the AI caller, or None when it cannot be told.
+    """AI 화자 id. 판정 못 하면 None.
 
-    1. Old format: an ``AGENT`` speaker is taken as is.
-    2. Whoever said the opening line (verbatim by instruction) is the agent.
-       The opening is split across segments sometimes, so a speaker's first
-       three segments are joined before comparing.
-    3. Otherwise, whoever shares the most wording with the scenario's lines.
+    1. 이전 포맷의 AGENT 화자는 그대로 사용
+    2. 첫 마디를 말한 쪽(조각날 수 있어 처음 세 조각을 합쳐 비교)
+    3. 그래도 애매하면 시나리오 대사와 겹치는 표현이 가장 많은 쪽
     """
     segs = [s for s in segments if segment_text(s).strip()]
     speakers: list[str] = []
@@ -108,7 +89,7 @@ def identify_agent_speaker(segments: Iterable[Any], scenario) -> str | None:
     if "AGENT" in upper:
         return upper["AGENT"]
     if len(speakers) == 1:
-        return None  # one voice only: nothing to tell apart by
+        return None
 
     opening, lines = _reference_lines(scenario)
     by_speaker: dict[str, list[str]] = {sp: [] for sp in speakers}
@@ -124,8 +105,7 @@ def identify_agent_speaker(segments: Iterable[Any], scenario) -> str | None:
         for sp, texts in by_speaker.items():
             head = " ".join(texts[:3])
             best_single = max((_similarity(t, opening) for t in texts[:3]), default=0.0)
-            # 첫 마디 앞에 군말이 붙을 수 있어서, 앞부분만이 아니라
-            # 처음 몇 문장 안에서 첫 마디 길이의 구간을 밀어 가며 가장 비슷한 곳을 본다.
+            # 첫 마디 앞에 군말이 붙을 수 있어 앞부분 안에서 구간을 밀어 가며 본다.
             opening_scores[sp] = max(best_single, _best_window(head, opening))
         winner, top, second = ranked(opening_scores)
         if top >= _MIN_OPENING_MATCH and top - second >= _MIN_MARGIN:
@@ -145,7 +125,7 @@ def identify_agent_speaker(segments: Iterable[Any], scenario) -> str | None:
 
 
 def label_roles(segments: Iterable[Any], agent_speaker: str) -> list[dict[str, str]]:
-    """[{"role": "assistant"|"user", "text": ...}] in transcript order."""
+    """녹취 순서대로 [{"role": "assistant"|"user", "text": ...}]."""
     return [
         {"role": "assistant" if segment_speaker(s) == agent_speaker else "user", "text": segment_text(s).strip()}
         for s in segments
@@ -153,11 +133,8 @@ def label_roles(segments: Iterable[Any], agent_speaker: str) -> list[dict[str, s
     ]
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────
-
-
 def _main(argv: list[str] | None = None) -> int:
-    import ai.config  # noqa: F401 -- loads backend/.env
+    import ai.config  # noqa: F401  backend/.env 로딩
     from ai.harness import audit_transcript
     from ai.managed_agent import ClawOpsREST
     from ai.scenarios import get_scenario

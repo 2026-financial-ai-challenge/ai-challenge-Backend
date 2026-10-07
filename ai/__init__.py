@@ -1,1 +1,1 @@
-"""Safety Phishing Call — educational voice-simulation pipeline."""
+"""훈련 통화 시나리오, 에이전트 규칙, 채점 라벨."""

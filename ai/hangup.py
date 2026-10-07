@@ -1,11 +1,6 @@
-"""Detecting that the trainee wants to end the call.
+"""훈련자의 종료 의사 판정. 리포트 간이 채점(report_service.heuristic_report)용.
 
-This drives two things that must agree: the caller's behaviour (hold on to
-the first attempt, hang up on the second) and the report's scoring, where
-"전화 종료(빠른 판단)" is one of the highest-weighted defensive behaviours.
-The pattern used to be copy-pasted into both call sites, so widening one and
-not the other would have silently changed the score without changing the
-conversation. One definition, imported by both.
+통화 중 AI가 끊는 시점은 managed_agent의 전화 규칙이 정한다(여기 아님).
 """
 
 from __future__ import annotations
@@ -14,13 +9,8 @@ import re
 
 __all__ = ["HANG_UP", "HANG_UP_TAIL_CHARS", "wants_hang_up"]
 
-# Deliberately conservative: every alternative below is terminal on a phone
-# call. Refusals ("안 할래요", "됐어요") are NOT included -- they mean "no" to
-# the request, not "I am ending this call", and the scenarios rely on that
-# distinction to keep pushing.
-#
-# "이만" only counts when followed by a closing verb: on its own it is the
-# number 20,000 ("이만 삼천 원").
+# 거절("안 할래요", "됐어요")은 종료 의사가 아니라서 뺐다.
+# "이만"은 뒤에 종료 표현이 붙을 때만 인정("이만 삼천 원" 오탐 방지).
 HANG_UP = re.compile(
     r"끊겠|끊을게|끊습니다|끊는다|전화\s*끊|"
     r"끝낼|끝내겠|끝내죠|끝냅니다|"
@@ -33,16 +23,7 @@ HANG_UP = re.compile(
 )
 
 
-# Announcing the end of a call is the last thing someone says. The same words
-# earlier in a long answer are almost always reported speech -- "그 사람이 전화
-# 끊으라고 하던데요" -- and the trainee carries straight on talking past them.
-# Requiring the match to land in the tail costs nothing on a short utterance:
-# anything shorter than this window is all tail, so every one-line closing
-# behaves exactly as it did before.
-#
-# This matters more than it used to. PhonePipelineSession now merges a turn
-# that Deepgram split across several finals back into one utterance, so the
-# text this sees is a whole answer rather than a fragment of one.
+# 발화 끝 30자 안에서만 인정. 앞부분의 같은 표현은 대개 인용이다("그 사람이 전화 끊으라던데요").
 HANG_UP_TAIL_CHARS = 30
 
 

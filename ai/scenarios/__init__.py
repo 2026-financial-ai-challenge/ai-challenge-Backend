@@ -1,14 +1,4 @@
-"""Fixed training scenarios.
-
-Scenarios are hand-written and live in ai/scenarios/library.py. Looking one up
-costs no network call, so a training call no longer waits on an LLM before the
-phone rings. The live in-call LLM is the only thing that still hits an API key,
-and it treats the scenario as its guideline rather than a script.
-
-There is no per-call generation: the script mode speaks pre-written lines
-that are synthesized before the call (ai/prerender.py), which a scenario
-written seconds before dialing could not have.
-"""
+"""시나리오 조회·선택. 내용은 library.py."""
 
 from __future__ import annotations
 
@@ -36,33 +26,25 @@ SCENARIOS: dict[str, Scenario] = {
     playbook.id: to_scenario(playbook) for playbook in PLAYBOOKS
 }
 
-# Historical id used by CALL_SCENARIO and by the backend default. Kept so an
-# existing deployment keeps working without an env change.
+# 이전 id → 현재 id. 백엔드 기본값과 저장된 통화 기록 때문에 유지.
 _ALIASES = {
     "voice_phishing_training": DEFAULT_SCENARIO_ID,
-    # 2026-10-05에 시나리오를 바꾸면서 id도 바꿨다. 예전 통화 기록과 배포 전 백엔드가 계속 찾을 수 있게 남긴다.
     "delivery_payment_error": "ipo_allocation",
     "family_emergency": "card_delivery",
 }
 
-# Which scenario the last pick_scenario() handed out, so back-to-back training
-# calls in one process do not repeat themselves.
+# 연속 중복 방지용. 프로세스 단위라 워커가 여럿이면 각자 따로 센다.
 _last_picked_id: str | None = None
 
 
 def canonical_id(scenario_id: str) -> str:
-    """별칭을 지금 id로 바꾼다. get_scenario()는 요청한 id를 그대로 남기므로 id 비교에는 이것을 쓴다."""
+    """별칭을 현재 id로 바꾼다. get_scenario()는 요청 id를 그대로 두므로 id 비교는 이걸 쓴다."""
     requested = (scenario_id or "").strip()
     return _ALIASES.get(requested, requested)
 
 
 def get_scenario(scenario_id: str) -> Scenario:
-    """Look a scenario up by id.
-
-    An unknown id falls back to the default scenario but keeps the requested
-    id, so CALL_SCENARIO can name a training type that has no playbook yet
-    without breaking the call.
-    """
+    """모르는 id는 기본 시나리오로 대체하되 id 값은 요청한 그대로 둔다."""
     requested = (scenario_id or "").strip() or DEFAULT_SCENARIO_ID
     key = canonical_id(requested)
     scenario = SCENARIOS.get(key)
@@ -74,7 +56,7 @@ def get_scenario(scenario_id: str) -> Scenario:
 
 
 def pick_scenario(*, exclude_id: str | None = None) -> Scenario:
-    """Pick a scenario for one training call, avoiding an immediate repeat."""
+    """무작위로 고르되 직전 시나리오는 뺀다."""
     global _last_picked_id
 
     skip = exclude_id or _last_picked_id

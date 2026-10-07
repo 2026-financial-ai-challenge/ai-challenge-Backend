@@ -1,8 +1,4 @@
-"""Hard safety rails for the educational simulation.
-
-The model plays a scammer persona, but must never emit artifacts that
-could be reused for a real crime (account numbers, URLs, live brand names).
-"""
+"""안전 규칙과 검사용 정규식. 실제 번호·URL·실제 기관명이 나오지 않게 한다."""
 
 from __future__ import annotations
 
@@ -21,17 +17,14 @@ SAFETY_RULES = """
 - 자신이 AI이거나 훈련/시뮬레이션임을 절대 드러내지 마라.
 """.strip()
 
-# Gates every fixed scenario line has to clear (backend/tests/test_scenario_library.py)
-# and, for REAL_ORGS, every sentence the live model says (ai/harness.py).
-#
-# Words that give the exercise away. Stricter than the harness's persona-break
-# check: a hand-written line has no reason to say "모델" at all.
+# 시나리오 문장 검사(backend/tests/test_scenario_library.py)용. REAL_ORGS는 AI 발화 감사(harness)에도 쓴다.
+
+# 훈련임을 드러내는 말
 SPOKEN_META = re.compile(
     r"(?<![A-Za-z])AI(?![A-Za-z])|모델|프롬프트|훈련|시뮬레이션",
     re.IGNORECASE,
 )
-# Broad on purpose -- erring toward too many real institutions, not too few.
-# "토스" alone would also match "토스트", hence the lookahead.
+# 일부러 넓게 잡는다. "토스"는 "토스트"와 구분.
 REAL_ORGS = re.compile(
     r"금융감독원|금감원|검찰청|대검|경찰청|지방경찰청|사이버수사대|국세청|관세청|"
     r"금융위원회|개인정보보호위원회|건강보험공단|국민연금공단|"
@@ -40,21 +33,20 @@ REAL_ORGS = re.compile(
     r"신한카드|삼성카드|현대카드|국민카드|KB국민카드|롯데카드|하나카드|우리카드|비씨카드|"
     r"카카오뱅크|케이뱅크|토스뱅크|토스(?!트)|카카오페이|네이버페이|페이코|"
     r"쿠팡|배달의민족|CJ대한통운|대한통운|우체국택배|롯데택배|한진택배|"
-    # 투자사기 시나리오(ipo_allocation)용. '증권사' 같은 일반 명사는 넣지 않는다.
+    # ipo_allocation용. '증권사' 같은 일반 명사는 넣지 않는다.
     r"미래에셋|키움증권|삼성증권|NH투자증권|한국투자증권|KB증권|신한투자증권|하나증권|대신증권|메리츠증권|토스증권|"
     r"한국거래소|금융투자협회"
 )
-# URLs and digit runs long enough to be reused as an account or card number.
+# URL, 계좌·카드번호로 쓰일 수 있는 6자리 이상 숫자
 UNSAFE_TOKEN = re.compile(r"https?://|www\.|\d{6,}", re.IGNORECASE)
 
-# Consecutive digits long enough to look like an account, card, or phone fragment.
 _LONG_DIGITS = re.compile(r"\d{6,}")
 _URL = re.compile(r"(https?://\S+|www\.\S+)", re.IGNORECASE)
 _PHONE = re.compile(r"(?:\+82|0)\s*\d{1,2}\s*-?\s*\d{3,4}\s*-?\s*\d{4}")
 
 
 def sanitize_spoken_text(text: str) -> str:
-    """Strip accidentally generated exploitable tokens before TTS."""
+    """번호, URL을 "안내 번호", "안내 주소"로 바꾼다."""
     cleaned = _URL.sub("안내 주소", text)
     cleaned = _PHONE.sub("안내 번호", cleaned)
     cleaned = _LONG_DIGITS.sub("안내 번호", cleaned)

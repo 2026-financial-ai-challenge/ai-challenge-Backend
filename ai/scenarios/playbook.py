@@ -1,13 +1,6 @@
-"""Fixed scenario playbooks and the prompt they compile into.
+"""Playbook 정의와 지시문 조립.
 
-A Playbook is the hand-written guideline for one kind of training call. It is
-not a script: the live LLM still writes every reply, but it does so inside the
-event, goal, and pressure tactics fixed here. Nothing in this module calls an
-API, so a call can start with zero LLM round trips.
-
-Prompt layout is deliberate. SAFETY_RULES and _STYLE_RULES are byte-identical
-across every playbook and come first, so the whole set shares one cacheable
-prefix; only the short scenario block below them varies.
+Playbook은 대본이 아니다. 대사는 모델이 쓰고, 여기서는 사건·목표·압박 방향만 고정한다.
 """
 
 from __future__ import annotations
@@ -21,9 +14,7 @@ from ai.scenarios.types import Scenario
 __all__ = ["Playbook", "ScriptReply", "build_scenario_block", "build_system_prompt"]
 
 
-# Every sentence still has to end in punctuation the pipeline can split on
-# (clawops splits the stream at [.!?。！？]), but "!" was previously banned,
-# which flattened every urgent or pleading line into the same even tone.
+# 시나리오 공통 말투 규칙. TTS가 문장부호로 문장을 나누므로 끝 부호는 필수.
 _STYLE_RULES = """
 [말하는 방식]
 - 글이 아니라 말이다. 안내문이나 공지를 읽는 투로 말하지 않는다.
@@ -41,7 +32,7 @@ _STYLE_RULES = """
 
 @dataclass(frozen=True)
 class Playbook:
-    """One fixed training scenario, written by hand and never regenerated."""
+    """시나리오 한 편."""
 
     id: str
     name: str
@@ -49,9 +40,6 @@ class Playbook:
     difficulty: str
     persona_name: str
     organization: str
-    # Who the caller is and how they carry themselves, as prose. A sentence
-    # beats stitching organization and persona together: the family scenario
-    # has neither, and the register differs sharply between playbooks.
     role: str
     opening_line: str
     incident: str
@@ -62,36 +50,28 @@ class Playbook:
     red_flags: tuple[str, ...]
     ideal_trainee_response: str
     max_turns: int
-    # Few-shot (trainee line, caller reply) pairs. These teach length and
-    # register far more cheaply than another paragraph of instructions.
+    # (상대 말, 내 답) 퓨샷. 길이·말투는 지시문보다 예시로 잡는 게 잘 먹힌다.
     examples: tuple[tuple[str, str], ...] = ()
-    # (trigger name from ai.scenarios.reflex, canned reply). Answered without
-    # an LLM call, so the reply must fit anywhere in the conversation.
+    # CallContext에는 안 들어간다. 녹취 화자 판정용(ai/transcript.py).
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
-    # 거절했을 때 한 번 하는 포기 경고. 인물마다 손해나 불이익으로 압박한다.
+    # 거절 시 한 번 하는 포기 경고
     giveup_line: str = ""
-    # 목표의 마지막 요구를 승낙받으면 하는 넘김 말. 이 말 뒤 상대가 한 번 더 말하면 통화를 끝낸다.
+    # 마지막 요구를 승낙받았을 때의 넘김 말
     handoff_line: str = ""
     tts_voice_id: str | None = None
-    # Pre-written lines for the script call mode. Unlike turn_plan these ARE
-    # spoken verbatim, so each one must read as a finished caller line: one
-    # or two short sentences that fit wherever that step or intent comes up.
+    # progression → [단계별 대사 예시], script 첫 줄 → [상대 반응별 받아치기 예시]
     progression: tuple[str, ...] = ()
     script: tuple[ScriptReply, ...] = ()
 
 
 def build_system_prompt(playbook: Playbook) -> str:
-    """Compile a playbook into the system prompt for the live call."""
+    """안전·말투 규칙 + 시나리오 블록."""
     return "\n\n".join([SAFETY_RULES, _STYLE_RULES, build_scenario_block(playbook)]).strip()
 
 
 def build_scenario_block(playbook: Playbook) -> str:
-    """The scenario-specific part of the prompt, without the shared rules.
-
-    The managed-agent path (ai/managed_agent.py) keeps the shared rules on the
-    agent itself and sends only this block per call, as its CallContext.
-    """
+    """공통 규칙을 뺀 시나리오 부분(CallContext 본문)."""
     plan = "\n".join(
         f"{index}. {step}" for index, step in enumerate(playbook.turn_plan, 1)
     )
@@ -123,7 +103,7 @@ def build_scenario_block(playbook: Playbook) -> str:
 
 
 def to_scenario(playbook: Playbook) -> Scenario:
-    """Project a playbook onto the Scenario shape the pipelines consume."""
+    """백엔드용 Scenario로 변환."""
     return Scenario(
         id=playbook.id,
         name=playbook.name,

@@ -17,7 +17,7 @@ def test_old_format_agent_label_is_taken_as_is():
 
 
 def test_the_speaker_who_said_the_opening_line_is_the_agent():
-    """The trainee usually speaks first ("여보세요"), so order proves nothing."""
+    """훈련자가 먼저 말하는 경우가 많아("여보세요") 순서로는 판정할 수 없다."""
     segments = [
         seg("speaker_0", "여보세요?"),
         seg("speaker_1", "가온금융안전원 결제보호팀 서동현입니다."),
@@ -38,7 +38,7 @@ def test_opening_heard_imperfectly_still_identifies_the_agent():
 
 
 def test_opening_after_a_stray_preamble_still_identifies_the_agent():
-    """실제 통화 CA056aec...: 첫 마디 앞에 연기 예고가 붙어 앞부분 비교가 실패했다."""
+    """첫 마디 앞에 군말이 붙어도 AI를 찾는다."""
     segments = [
         seg("speaker_0", "잠깐만요. 이제 배송 기사처럼 이야기해 볼게요. "
                          "안녕하세요 한길퀵 카드 배송 최준호 기사입니다 가온카드 신규 카드 배송 건인데요 지금 댁에 계세요"),

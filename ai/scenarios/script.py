@@ -1,22 +1,6 @@
-"""Answering a trainee turn from pre-written lines instead of the live LLM.
+"""훈련자 의도에 맞는 미리 쓴 대사를 고른다. ScriptReply는 Playbook.script 타입이라 계속 쓴다.
 
-This is the core of the "script" call mode. A scenario ships two kinds of
-pre-written caller lines:
-
-- `progression`: the backbone of the call, in order. Each time the trainee
-  goes along with it ("네", "그런데요", their name), the next line is spoken.
-  This is how a real caller reading from a script moves a victim step by step.
-- `script`: answers keyed by trainee intent (ai/scenarios/intents.py) --
-  what to say to "누구세요", "다시 걸게요", "개인정보라 안 돼요" and so on.
-  Each intent has a few interchangeable variants.
-
-Because every line is known before the call, its audio can be synthesized in
-advance at full quality (ai/prerender.py) and played the moment the trainee
-stops talking. Anything the router is not sure about returns a miss, and the
-live LLM answers that turn exactly as before.
-
-A miss is never an error. It is the router saying "this one needs listening",
-and the ratio of hits to turns is the number `python -m ai.script_eval` reports.
+예전 대본 모드 코드. 현재 통화에서는 안 쓰고 backend/tests 때문에 남겨 둠.
 """
 
 from __future__ import annotations
@@ -30,7 +14,7 @@ __all__ = ["RouteDecision", "ScriptReply", "ScriptRouter"]
 
 @dataclass(frozen=True)
 class ScriptReply:
-    """Interchangeable caller lines for one trainee intent."""
+    """훈련자 의도 하나에 대한 대사 후보."""
 
     intent: str
     lines: tuple[str, ...]
@@ -38,15 +22,9 @@ class ScriptReply:
 
 @dataclass(frozen=True)
 class RouteDecision:
-    """What the router did with one trainee turn, and why.
+    """발화별 라우팅 결과.
 
-    `reason` is one of:
-      hit        -- `line` is the reply
-      no_intent  -- nothing matched
-      ambiguous  -- two different intents matched
-      long       -- too long to answer with a fixed line
-      no_line    -- the intent is known but this scenario has no line for it
-      exhausted  -- every variant was already used in this call
+    reason: hit(line으로 답함) | no_intent | ambiguous | long | no_line | exhausted(후보를 다 씀)
     """
 
     text: str
@@ -71,12 +49,7 @@ class RouteDecision:
 
 
 class ScriptRouter:
-    """Per-call state over one scenario's pre-written lines.
-
-    Never repeats a line within a call: a caller who says the exact same
-    sentence twice is the fastest way to sound recorded. Once an intent's
-    variants are spent, that intent goes to the LLM for the rest of the call.
-    """
+    """통화별 대사 사용 기록. 같은 대사는 두 번 쓰지 않는다."""
 
     def __init__(
         self,
@@ -88,8 +61,7 @@ class ScriptRouter:
         self._progression = tuple(line for line in progression if line.strip())
         self._next_step = 0
         lines: dict[str, list[str]] = {}
-        # Quick replies are the reflex table's one-liners. They answer the same
-        # intents ("누구세요", "안 들려요"), so they join the variant pool.
+        # quick_replies도 같은 의도의 답이라 후보에 포함
         for trigger, reply in quick_replies or ():
             if trigger and reply.strip():
                 lines.setdefault(trigger, []).append(reply.strip())
@@ -108,20 +80,12 @@ class ScriptRouter:
             quick_replies=tuple(getattr(scenario, "quick_replies", ()) or ()),
         )
 
-    @property
-    def has_script(self) -> bool:
-        return bool(self._progression or self._lines)
-
-    @property
-    def remaining_progression(self) -> int:
-        return max(0, len(self._progression) - self._next_step)
-
     def peek(self, text: str) -> RouteDecision:
-        """Decide without consuming anything (shadow mode, evaluation)."""
+        """대사를 쓰지 않고 판단만 한다."""
         return self._decide(classify(text), consume=False)
 
     def route(self, text: str) -> RouteDecision:
-        """Decide and consume the chosen line."""
+        """판단 후 고른 대사를 사용 처리한다."""
         return self._decide(classify(text), consume=True)
 
     def _decide(self, match: IntentMatch, *, consume: bool) -> RouteDecision:
@@ -151,11 +115,3 @@ class ScriptRouter:
                     self._used.add(line)
                 return RouteDecision(reason="hit", line=line, **base)
         return RouteDecision(reason="exhausted", **base)
-
-    def all_lines(self) -> tuple[str, ...]:
-        """Every line this router can speak -- what prerendering has to cover."""
-        seen: list[str] = []
-        for line in (*self._progression, *(l for ls in self._lines.values() for l in ls)):
-            if line not in seen:
-                seen.append(line)
-        return tuple(seen)

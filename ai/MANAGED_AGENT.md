@@ -18,7 +18,7 @@
 
 ```bash
 python -m ai.managed_agent sync --dry-run    # 보낼 내용만 확인
-python -m ai.managed_agent sync              # 시나리오 5 x 방식 2 = 10개 생성/갱신
+python -m ai.managed_agent sync              # external_tts 5개 생성/갱신 (live는 --variant live로 따로)
 ```
 
 이름 규칙은 `spc-<시나리오 id>-<방식>`입니다. 백엔드는 이 이름으로 에이전트를 찾습니다.

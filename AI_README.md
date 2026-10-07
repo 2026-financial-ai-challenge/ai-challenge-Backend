@@ -1,339 +1,168 @@
-# `AI` — 시나리오 엔진 · 안전 규칙 · 음성 파이프라인
+# `ai` — 훈련 통화의 시나리오 · 대화 규칙 · 채점 기준
 
-보이스피싱 훈련 통화에서 **AI가 무엇을 말할지 결정하는 부분**을 담는 패키지입니다.
-FastAPI 서버(`backend/app`)와 로컬 개발 하네스가 이 패키지를 **공유해서** 씁니다.
+보이스피싱 대응 훈련 전화에서 **AI 상담원이 무엇을 말할지**와 **통화가 끝난 뒤 무엇으로 채점할지**를 정하는 패키지입니다.
+통화는 ClawOps 매니지드 에이전트가 진행합니다. 백엔드(`backend/app`)는 이 패키지로 시나리오와 에이전트를 고르고, 통화별 지시문을 만들어 발신합니다.
+백엔드는 `backend/app/training/scenarios.py`의 `ensure_ai_importable()`로 이 패키지를 찾습니다(저장소 루트, 또는 Docker 이미지의 `/packages`).
 
-## 왜 `backend` 바깥에 있나
-
-시나리오·안전 규칙·행동 라벨·통화 종료 판정은 두 진입점이 **똑같이** 봐야 하는 정의입니다.
-
-- 전화 경로: `backend/app/services/call_service.py` → `backend/app/training/pipeline_session.py`
-- 로컬 경로: `python -m ai.test_latency --mic` (마이크·스피커로 같은 파이프라인 재현)
-
-양쪽에 복사해 두면 한쪽만 고쳐졌을 때 **채점 기준과 실제 대화가 조용히 어긋납니다.**
-예를 들어 "끊겠습니다" 판정 정규식은 통화 중 상대의 행동(첫 번째는 붙잡고 두 번째에 끊음)과
-리포트의 `전화 종료(빠른 판단)` 방어행동 채점을 동시에 결정합니다. 한쪽만 넓히면
-대화는 그대로인데 점수만 바뀝니다. 그래서 정의는 한 곳에만 둡니다.
-
-백엔드는 `backend/app/training/scenarios.py`의 `ensure_ai_importable()`로 이 패키지를 찾습니다.
-저장소 루트(로컬 실행)와 `/packages`(compose가 `../ai`를 마운트하는 경로)를 순서대로 탐색합니다.
-
----
-
-## 모듈 지도
-
-| 모듈 | 역할 | 전화 경로 | 로컬 하네스 |
-| --- | --- | :---: | :---: |
-| `config.py` | 환경변수 로딩과 접근자 | ○ (일부) | ○ |
-| `safety.py` | 안전 규칙 프롬프트 + 출력 후처리 | △ | ○ |
-| `hangup.py` | 통화 종료 의사 판정 | ○ | ○ |
-| `classifier.py` | 행동 라벨 정의 + 분류기 | △ | ○ |
-| `voices.py` | 계정에서 실제로 동작하는 보이스 목록 | ○ | ○ |
-| `scenarios/` | 시나리오 정의 · 라이브러리 · 동적 생성 | ○ | ○ |
-| `sentences.py` | 스트리밍 텍스트를 발화 단위로 절단 | ✕ | ○ |
-| `llm_stream.py` | 문장 단위 스트리밍 LLM | ✕ | ○ |
-| `stt_stream.py` | Deepgram 스트리밍 STT | ✕ | ○ |
-| `tts_stream.py` | ElevenLabs 스트리밍 TTS | ✕ | ○ |
-| `audio_io.py` | 마이크 / 스피커 어댑터 | ✕ | ○ |
-| `conversation_pipeline.py` | 위 네 개를 이어 붙인 한 턴 | ✕ | ○ |
-| `test_latency.py` · `test_stt.py` | 측정 하네스 | ✕ | ○ |
-| `harness.py` | 문장 가드 + 통화 모니터 (docs/harness.md) | ○ | ✕ |
-| `scenarios/intents.py` · `scenarios/script.py` | 대본 모드 의도 분류·라우터 (docs/script-mode.md) | ○ | ✕ |
-| `prerender.py` | 고정 대사 사전 합성·캐시 (`python -m ai.prerender`) | ○ | ✕ |
-| `script_eval.py` | 대본 적중률·정확도 측정 (`python -m ai.script_eval`) | ✕ | ✕ |
-
-**△ 표시가 중요합니다.** 전화 경로는 `classifier.py`에서 **라벨 튜플만** 가져다 쓰고
-(`RISK_LABELS`, `DEFENSE_LABELS`), 분류 호출은 `report_service.py`가 자체적으로 합니다.
-`safety.py`도 `SAFETY_RULES`(프롬프트)는 쓰지만 `sanitize_spoken_text()`(출력 후처리)는
-거치지 않습니다 — [알려진 제약](#알려진-제약) 참조.
-
-**✕ 표시 모듈은 전화 통화에 영향을 주지 않습니다.** `sentences.py`의 `_SOFT_FLUSH_LEN`을
-고쳐도 전화 경로는 통화 SDK의 문장 분할을 쓰므로 아무것도 바뀌지 않습니다.
-로컬에서 재현이 안 될 때 이 표를 먼저 확인하세요.
-
----
-
-## 1. 시나리오 시스템
-
-### 1.1 Playbook → Scenario
-
-시나리오는 **대본이 아니라 지침**입니다. 대사는 매 턴 실시간 LLM이 새로 쓰고,
-Playbook은 그 대사가 놓일 사건·목표·압박 방향을 고정합니다.
+## 통화 한 건의 흐름
 
 ```
-Playbook (ai/scenarios/library.py, 수기 작성)
-  ├ persona_name / organization / role   누가 거는가
-  ├ opening_line                          연결 직후 나가는 고정 인사 (LLM 미경유)
-  ├ incident                              통화 내내 바뀌면 안 되는 사건
-  ├ goal / turn_plan / objection_handling 무엇을 얻으려 하고 어떻게 받아치는가
-  ├ examples                              퓨샷 — 길이와 말투를 여기서 가르친다
-  ├ quick_replies / hangup_line           LLM 없이 답할 발화
-  ├ progression / script                  대본 모드에서 그대로 읽는 대사 (미리 합성)
-  └ tactics / red_flags / ideal_...       통화 후 리포트 채점 기준으로 재사용
+[발신] backend/app/services/call_service.py
+  get_runtime_scenario()                시나리오 고르기 (ai/scenarios)
+  pick_variant(), resolve_agent_id()    에이전트 spc-<시나리오 id>-<방식> 찾기 (ai/managed_agent.py)
+  build_call_context()                  통화별 지시문 만들기 (4,000자 이내)
+  ClawOps calls.create                  이후 대화는 ClawOps가 진행
+                                        OpenAI Realtime(gpt-realtime-2.1)이 듣고 답을 쓰고, Cartesia(sonic-3.5)가 말합니다
 
-        ↓ playbook.py : build_system_prompt() + to_scenario()
-
-Scenario.system_prompt = SAFETY_RULES + _STYLE_RULES + 시나리오 블록 + 퓨샷
+[통화 후] backend/app/services/report_service.py
+  identify_agent_speaker()              녹취록에서 AI 화자 가려내기 (ai/transcript.py)
+  audit_transcript()                    AI 발화 안전 감사, 로그만 남김 (ai/harness.py)
+  LLM 채점                              시나리오의 tactics · red_flags · ideal_trainee_response와 행동 라벨(ai/classifier.py)로 채점
+  heuristic_report()                    LLM을 못 쓰면 키워드 간이 채점 (ai/hangup.py)
 ```
 
-`turn_plan`과 `objection_handling`은 **대사 원문이 아니라 행동 지시**로 씁니다.
-대사를 그대로 박아 두면 LLM이 그걸 낭독해서 대화가 죽습니다.
+## 지시문은 두 층입니다
 
-> **프롬프트 배치는 의도적입니다.** `SAFETY_RULES`와 `_STYLE_RULES`는 다섯 시나리오에서
-> 바이트 단위로 동일하고 맨 앞에 옵니다(약 733자). 프리픽스 캐시를 쓰는 공급자에서
-> 이 구간이 적중하도록 고정 부분을 앞에, 변동 부분을 뒤에 두었습니다.
+| 층 | 들어가는 것 | 코드 | 반영 |
+| --- | --- | --- | --- |
+| 에이전트 공통 규칙 | 안전 규칙, 말투 규칙, 전화 규칙 (4,861자, 한도 16,000자) | `safety.SAFETY_RULES`, `scenarios/playbook._STYLE_RULES`, `managed_agent._PHONE_RULES` | **sync해야** 반영 |
+| 통화별 지시(CallContext) | [첫 마디], 역할 · 사건 · 목표 · 진행 · 받아치기 · 예시, 단계별 대사 예시, 받아치기 예시, 경고와 넘김 말, 통화 길이 (2,524~3,302자, 한도 4,000자) | `scenarios/library.py` → `managed_agent.build_call_context()` | 운영 배포 뒤 **다음 통화부터** |
 
-### 1.2 고정 라이브러리 — 현재 기본값
+- sync는 최신 `develop` 코드로만 돌립니다: `python -m ai.managed_agent sync --variant external_tts`.
+  sync는 에이전트 설정 전체를 덮어쓰므로, 콘솔에서만 바꾼 값은 다음 sync 때 되돌아갑니다. API에 없는 콘솔 전용 설정만 예외입니다([`ai/MANAGED_AGENT.md`](ai/MANAGED_AGENT.md)).
+- 통화별 지시가 4,000자를 넘으면 단계별 대사 예시, 받아치기 예시 순으로 빼고, 그래도 넘으면 오류를 냅니다.
+- 실제로 보내는 지시문은 `python -m ai.managed_agent context --scenario <id>`로 볼 수 있습니다.
 
-| `id` | 시나리오 | 유형 | 난이도 | `max_turns` |
-| --- | --- | --- | :---: | :---: |
-| `bank_security_hold` | 해외 결제 승인 가로채기 | 기관사칭형 | 중 | 8 |
-| `low_interest_loan` | 대환대출 선상환 요구 | 대출사기형 | 하 | 7 |
-| `ipo_allocation` | 공모주 우선 배정 투자 권유 | 투자사기형 | 하 | 8 |
-| `card_delivery` | 카드 배송원 사칭 | 배송원사칭형 | 중 | 8 |
-| `investigation_unit` | 명의도용 수사 협조 압박 | 수사기관사칭형 | 상 | 9 |
+## 전화 규칙 요약 (`managed_agent._PHONE_RULES`)
 
-- `get_scenario(id)` — 모르는 id는 기본 시나리오로 폴백하되 **요청한 id는 유지**합니다.
-  `CALL_SCENARIO`가 아직 플레이북이 없는 훈련 유형을 가리켜도 통화가 깨지지 않게 하려는 처리입니다.
-- `pick_scenario()` — 직전에 뽑힌 것을 후보에서 빼서 연속된 두 통화가 겹치지 않게 합니다.
-  (`_last_picked_id`는 모듈 수준 상태이므로 프로세스 단위입니다.)
-- `voice_phishing_training`은 구 id입니다. `_ALIASES`가 `bank_security_hold`로 넘겨
-  기존 배포의 `CALL_SCENARIO` 설정이 그대로 동작합니다.
+- [첫 마디]를 토씨 하나 바꾸지 않고 말하고, 덧붙이지 않고 대답을 기다립니다. 상대가 인사를 청하면 "아, 안녕하세요."로 받습니다.
+- [역할]의 말투를 끝까지 지키고, 한국어로만, 한 번에 두 문장까지 말합니다.
+- 거절하면 [거절할 때 경고](포기 경고)를 말합니다. 그 뒤 또 거절하거나, 끊겠다고 하거나, 장난을 치면 통화를 끝냅니다.
+- 끊겠다는 말을 처음 들으면 [끊으려 할 때 경고]로 붙잡고, 두 번째에 끝냅니다. 포기 경고를 이미 했으면 바로 끝냅니다.
+- 마지막 요구를 하겠다고 하면 [승낙받으면 넘김]을 말하고, 상대가 한 마디 더 하면 끝냅니다.
+- 엉뚱한 말이나 장난, 겉도는 대답이 세 번 이어지면 거절로 봅니다.
+- 끝낼 때는 아무 말 없이 종료 도구만 부릅니다. 종료 도구와 같은 차례에 한 말은 재생되기 전에 끊기기 때문입니다.
+- 숫자, 주소, 링크를 지어내지 않습니다. 상대가 실제 번호를 불러 주려 하면 막습니다.
+- 통화 비서나 자동 응답에는 소속, 이름, 용건을 한 문장으로 말하고 기다립니다.
+- 예외: 받은 사람이 다르면 "죄송합니다, 잘못 걸었습니다."만 말합니다. 위급하다고 하면 역할을 멈추고 훈련 전화였다고 알립니다. 상대가 한 마디도 하지 않았으면 끝내지 않습니다(말 없는 통화는 콘솔의 무응답 처리가 끝냅니다).
 
-> **통화마다 시나리오를 새로 만들지 않습니다(2026-09-24 결정).** 예전에는 통화 직전에 LLM이
-> 시나리오를 쓰는 동적 생성(`generator.py`)이 있었지만 삭제했습니다.
->
-> - 대본 모드는 대사가 통화 전에 정해져 있어야 미리 합성·즉시 재생할 수 있습니다.
->   직전에 생성된 시나리오에는 대사도 음성도 없어서 모든 턴이 다시 LLM으로 갑니다.
-> - 생성+검수 왕복(최대 6회)이 곧 전화가 울리기 전의 대기였습니다.
-> - 사람이 검토하고 테스트가 금지어를 검사한 대사만 통화에 나가야 합니다.
->
-> 같은 대본을 두 번 만나는 문제는 **시나리오 편수와 변형 대사를 늘려서** 풉니다.
-> LLM은 통화 때가 아니라 새 플레이북 초안을 쓸 때 쓰고, 사람이 다듬어 `library.py`에 넣습니다.
+규칙마다 어떤 통화에서 드러난 문제를 고친 것인지 `_PHONE_RULES` 위 주석에 통화 id와 함께 적어 두었습니다.
 
-### 1.3 대본 모드와 하네스
+## 시나리오 (`scenarios/library.py`)
 
-- 대본 모드(`CALL_SCRIPT_MODE`): [`../docs/script-mode.md`](../docs/script-mode.md)
-- 통화 하네스(문장 가드·통화 모니터): [`../docs/harness.md`](../docs/harness.md)
+| id | 이름 | 유형 · 난이도 | 인물 | 최대 발화 |
+| --- | --- | --- | --- | :---: |
+| `bank_security_hold` | 해외 결제 승인 가로채기 | 기관사칭형 · 중 | 서동현(가온금융안전원 결제보호팀) | 8 |
+| `low_interest_loan` | 대환대출 선상환 요구 | 대출사기형 · 하 | 박수현(미래드림 금융생활지원센터) | 7 |
+| `ipo_allocation` | 공모주 우선 배정 투자 권유 | 투자사기형 · 하 | 한지수(온새미투자자문 공모주배정팀) | 8 |
+| `card_delivery` | 카드 배송원 사칭 | 배송원사칭형 · 중 | 최준호(한길퀵 카드배송) | 8 |
+| `investigation_unit` | 명의도용 수사 협조 압박 | 수사기관사칭형 · 상 | 서재욱(금융범죄 합동대응반 자산보전과) | 9 |
 
-### 1.4 모델은 교체 가능한 부품
+시나리오는 대본이 아니라 지침입니다. 대사는 매 차례 모델이 새로 쓰고, 시나리오는 사건, 목표, 압박 방향을 고정합니다. 그래서 `turn_plan`과 `objection_handling`은 대사가 아니라 행동 지시로 씁니다.
 
-통화 중 응답 모델은 `CALL_LLM_PROVIDER` · `OPENAI_MODEL` / `GEMINI_MODEL`로 지정합니다.
-두 키가 모두 있으면 1순위가 첫 토큰 전에 실패할 때 다른 쪽이 그 턴을 대신 답합니다.
-리포트 생성은 Gemini의 OpenAI 호환 엔드포인트(`config.GEMINI_OPENAI_BASE_URL`)로
-같은 `AsyncOpenAI` 클라이언트를 씁니다.
+| 필드 | 쓰임 |
+| --- | --- |
+| `opening_line` | [첫 마디] |
+| `role` · `incident` · `goal` · `turn_plan` · `objection_handling` · `examples` | 통화별 지시의 본문 |
+| `progression` | [단계별 대사 예시] |
+| `script` | 의도별 첫 줄만 [상대 반응별 받아치기 예시] |
+| `giveup_line` · `handoff_line` · `hangup_line` · `max_turns` | [거절할 때 경고] · [승낙받으면 넘김] · [끊으려 할 때 경고] · [통화 길이] |
+| `tactics` · `red_flags` · `ideal_trainee_response` | 리포트 채점 기준 |
+| `quick_replies` · `script`의 두 번째 줄 · `tts_voice_id` | 통화 지시문에는 들어가지 않습니다. 녹취 화자 판정과 이전 코드에서만 씁니다 |
 
-> **주의: 숨은 추론 토큰이 켜진 모델은 피해야 합니다.** 추론 토큰은 첫 가시 토큰보다
-> 먼저 소모되므로 전화에서는 그대로 무음이 됩니다. 측정 결과 비-lite 계열 flash 모델은
-> 28–85초가 걸리고 본문이 비어 오는 경우도 있었습니다.
+- **고르는 방법:** `CALL_SCENARIO`가 비어 있으면 통화마다 무작위로 고르고, 직전 시나리오는 빼서 연달아 겹치지 않게 합니다(`pick_scenario`). `CALL_SCENARIO`는 모든 통화를, `ANNOUNCED_CALL_SCENARIO`는 1차(예고) 통화만 한 시나리오로 고정합니다.
+- **모르는 id:** 기본 시나리오(`bank_security_hold`)로 넘어가되 요청한 id는 유지합니다. 예전 id(`voice_phishing_training`, `delivery_payment_error`, `family_emergency`)는 `_ALIASES`가 지금 id로 잇습니다.
+- **문자:** 통화 중에는 문자를 보내지 않습니다(2026-10-07에 제거). 시나리오도 문자를 보냈다고 말하지 않습니다. 카드배송만 사고 접수 번호를 "문자로 보내 드리겠다"고 약속하고, 실제 문자는 가지 않습니다.
+- **작성 규칙:** 새 시나리오를 쓰거나 고칠 때는 [`ai/scenarios/scenario_generation_guidelines.md`](ai/scenarios/scenario_generation_guidelines.md)를 따릅니다. 실제 수법과 통계 근거는 [`docs/research/voice-phishing-patterns.md`](docs/research/voice-phishing-patterns.md)에 있습니다.
 
----
+## 안전 장치
 
-## 2. 안전 규칙
+AI가 사기범을 연기하되, 실제 범죄에 다시 쓸 수 있는 내용은 내지 않게 합니다.
 
-AI가 사기범을 연기하되 **실제 범죄에 재사용 가능한 산출물**을 내지 않도록 세 겹으로 막습니다.
-
-| 계층 | 위치 | 차단 대상 |
+| 단계 | 위치 | 하는 일 |
 | --- | --- | --- |
-| 프롬프트 규칙 | `safety.SAFETY_RULES` | 실명 기관 사칭, 계좌·카드·주민번호·인증번호 발화, 전화번호·URL·앱 패키지명, AI/훈련임을 밝히는 것 |
-| 출력 후처리 | `harness.OutputGuard` (+ `safety.sanitize_spoken_text()`) | 실시간 LLM의 모든 문장: 역할 이탈·실명 기관·비밀정보 요구 차단, 숫자·URL 치환 |
-| 대사 검증 | `safety.REAL_ORGS` · `SPOKEN_META` · `UNSAFE_TOKEN` | 시나리오의 모든 필드와 대본 대사 (테스트에서 검사) |
+| 지시문 | `safety.SAFETY_RULES` (공통 규칙 맨 앞) | 실제 기관 이름 사칭, 계좌 · 카드 · 주민등록 · 인증번호, 전화번호 · URL · 앱 정보 말하기, AI나 훈련임을 드러내기를 금지합니다 |
+| 시나리오 문장 검사 | `safety.REAL_ORGS` · `SPOKEN_META` · `UNSAFE_TOKEN` | `backend/tests/test_scenario_library.py`가 모든 시나리오 문장을 검사합니다. 새 시나리오도 자동으로 검사합니다 |
+| 통화 후 감사 | `harness.audit_transcript` | 녹취록의 AI 발화에서 실제 기관 이름, 비밀정보 요구, 역할 이탈을 찾아 로그로 남깁니다 |
+| 위급 상황 | `_PHONE_RULES` [예외] | 상대가 위급하다고 하면 역할을 멈추고 훈련 전화였다고 알립니다 |
 
-기관명은 전부 가상입니다. 훈련자가 실명 기관을 먼저 언급하더라도 그 기관 직원을 사칭하지
-않습니다. 실재 기관명은 **해당 기관과 협력하는 형태로만** 도입할 수 있는 항목으로 분류해
-두었습니다 — 훈련 몰입도에는 도움이 되지만 협력 없이 넣을 성질의 것이 아닙니다.
+기관 이름은 모두 가상입니다. 상대가 실제 기관 이름을 먼저 말해도 그 기관 직원인 척하지 않습니다.
+매니지드 에이전트는 말을 만들자마자 재생하므로 통화 중에 문장을 걸러 낼 수 없습니다. 지시문과 통화 후 감사가 그 몫을 합니다.
 
-이 규칙들은 `backend/tests/test_scenario_library.py`가 실제로 검사합니다.
-시나리오를 추가하면 그 테스트가 새 시나리오도 자동으로 검사합니다.
+## 리포트 채점 기준
 
----
+점수는 백엔드 `report_service.calculate_response_score()`가 계산합니다. 기본 60점에서 행동마다 가중치(`RISK_SCORE_WEIGHTS`, `DEFENSE_SCORE_WEIGHTS`)를 더하고 빼서 0~100점으로 맞춥니다.
+채점 LLM(OpenAI, 없으면 Gemini)이 뽑은 행동 가운데, 훈련자가 실제로 한 말로 근거가 확인된 것만 점수에 넣습니다.
 
-## 3. 통화 중 판정 로직
-
-### 3.1 종료 의사 — `hangup.py`
-
-```python
-wants_hang_up("이만 삼천 원 결제됐다고요?")      # False — 금액의 "이만"
-wants_hang_up("네 알겠습니다, 이만 끊을게요")     # True
-wants_hang_up("그 사람이 전화 끊으라던데요, 무슨 일이죠?")  # False — 발화 앞부분의 인용
-```
-
-세 가지 도메인 판단이 들어 있습니다.
-
-- **거절은 종료가 아닙니다.** "안 할래요", "됐어요"는 요청에 대한 거부이지 통화를 끝내겠다는
-  뜻이 아니고, 시나리오는 그 구분에 의존해 계속 압박합니다. 그래서 패턴에 넣지 않았습니다.
-- **"이만"은 뒤에 종료 동사가 올 때만** 셉니다. 단독으로는 숫자 20,000입니다(예: "이만 삼천 원").
-- **발화 끝 30자(`HANG_UP_TAIL_CHARS`) 안에서만** 인정합니다. 통화를 끝내겠다는 선언은
-  마지막에 옵니다. 긴 답변 앞부분의 같은 표현은 대개 인용입니다.
-
-마지막 항목은 파이프라인이 발화 조각을 하나로 병합하게 되면서 더 중요해졌습니다.
-이 함수가 보는 텍스트가 이제 문장 조각이 아니라 답변 전체이기 때문입니다.
-
-### 3.2 즉답 테이블 — `scenarios/reflex.py`
-
-답이 시나리오에서 이미 정해진 발화는 LLM 왕복을 통째로 건너뜁니다.
-
-| 트리거 | 예시 발화 |
+| 위험 행동 (`RISK_LABELS`, 8개) | 방어 행동 (`DEFENSE_LABELS`, 6개) |
 | --- | --- |
-| `scam_accusation` | "이거 보이스피싱 아니에요?" |
-| `not_audible` | "안 들려요", "소리가 작아요" |
-| `repeat_that` | "뭐라고요?", "다시 말해 주세요" |
-| `who_is_this` | "누구세요?", "어디시죠?" |
-| `busy_now` | "지금 바빠요", "운전 중이에요" |
+| 개인정보 제공 · 금융정보 제공 · 상대방 기관명 신뢰 · 송금 의사 표현 · 링크 접근 의사 · 앱 설치 의사 · 지정 번호 전화 의사 · 통화 장시간 지속 | 상대방 신원 확인 · 공식 대표번호 확인 의사 · 개인정보 제공 거절 · 송금 거절 · 전화 종료(빠른 판단) · 신고 의사 표현 |
 
-순서가 의미를 갖습니다. 먼저 매칭되는 패턴이 이기므로 구체적인 의도(사기 지적)를
-일반적인 것("누구세요") 앞에 둡니다. `scam_accusation`은 **지연 개선과 실감이 같은 방향**입니다 —
-실제 사기범은 그 질문에 망설이지 않습니다.
+- `지정 번호 전화 의사`는 카드배송처럼 상대가 알려 주거나 보내 준 번호로 전화하겠다는 대답입니다(2026-10-07 추가).
+- 라벨을 더하면 백엔드 `RISK_SCORE_WEIGHTS`나 `DEFENSE_SCORE_WEIGHTS`에도 가중치를 넣어야 합니다. 없으면 리포트에는 나오지만 점수는 바뀌지 않습니다.
+- LLM을 쓸 수 없거나 훈련자 발화가 없으면 키워드로 간이 채점합니다. 끊으려 했는지는 `hangup.wants_hang_up()`이 판정합니다.
+  - 거절("안 할래요", "됐어요")은 끊겠다는 말로 보지 않습니다.
+  - "이만"은 뒤에 끊는다는 말이 올 때만 셉니다. "이만 삼천 원"의 "이만"은 숫자입니다.
+  - 발화 끝 30자 안에 있을 때만 인정합니다. 긴 말 앞부분의 같은 표현은 대개 남의 말을 옮긴 것입니다.
+- 통화 중에 AI가 언제 끊을지는 `hangup.py`가 아니라 위의 전화 규칙이 정합니다.
 
-세 가지 제약을 둡니다.
+## 실행
 
-- 트리거당 한 통화에 **한 번만** — 같은 말을 두 번 하지 않도록
-- 통화 전체 `CALL_REFLEX_BUDGET`회(기본 3, `0`이면 비활성)
-- `MAX_REFLEX_CHARS`=40자 초과 발화는 매칭에서 제외 — 긴 문장 안의 같은 단어는 전혀
-  다른 의도이고, `search()`로는 구분할 수 없습니다. 문단을 "가온금융안전원 서동현입니다."로
-  받는 것은 한 박자 늦게 답하는 것보다 나쁩니다.
-
-### 3.3 행동 라벨 — `classifier.py`
-
-**점수는 여기서 계산하지 않습니다.** 이 모듈은 근거와 함께 행동을 라벨링만 하고,
-점수 산식은 백엔드 `report_service.calculate_response_score()`가 갖습니다.
-같은 대화를 두 번 채점해도 같은 점수가 나오게 하려는 분리입니다.
-
-| 위험행동 (7) | 방어행동 (6) |
-| --- | --- |
-| 개인정보 제공 · 금융정보 제공 · 상대방 기관명 신뢰 · 송금 의사 표현 · 링크 접근 의사 · 앱 설치 의사 · 통화 장시간 지속 | 상대방 신원 확인 · 공식 대표번호 확인 의사 · 개인정보 제공 거절 · 송금 거절 · 전화 종료(빠른 판단) · 신고 의사 표현 |
-
-`_filter_known_labels()`가 목록에 없는 라벨과 근거가 빈 항목을 버립니다.
-백엔드는 여기서 **라벨 튜플만** import하고 분류 호출은 자체 프롬프트로 합니다.
-
-### 3.4 보이스 — `voices.py`
-
-```python
-WORKING_VOICE_IDS   = (THEO, YOHAN_KOO, Kelee_K, Onyu)   # 이 계정에서 합성 확인됨
-AVAILABLE_VOICE_IDS = (THEO, YOHAN_KOO, Kelee_K)          # random_voice_id()의 후보
-```
-
-`Hanna`와 `Zara`는 **이 계정에서 아무 소리도 나지 않습니다.** Voice Library 보이스는
-유료 플랜이 필요하고, API가 402를 반환하며 스트림이 0바이트로 닫힙니다.
-통화에서 그것은 음질 저하가 아니라 **완전한 무음**입니다.
-시나리오에 보이스를 배정할 때는 반드시 위 목록 안에서 고르세요.
-
----
-
-## 4. 로컬 음성 파이프라인
-
-전화 없이 마이크·스피커로 같은 흐름을 재현합니다. 각 단계가 제너레이터라
-어댑터만 갈아 끼우면 전화망으로 옮겨갈 수 있는 구조입니다.
-
-```
-AudioSource → stt_stream → llm_stream → tts_stream → AudioSink
-(LocalMicSource)                                     (LocalSpeakerSink / NullAudioSink)
-```
-
-`conversation_pipeline.run_turn()`이 한 턴을 담당하고, `LatencyMetrics`에
-네 개의 시점을 찍습니다: LLM 첫 토큰 / 첫 문장 완성 / TTS 첫 바이트 / 종단.
-
-### 문장 절단 — `sentences.py`
-
-전체 응답을 버퍼링하지 않습니다. **말할 수 있는 문장이 완성되는 즉시** 흘려보내
-TTS가 바로 시작하게 합니다.
-
-- `.!?。！？\n`을 만나면 즉시 절단 (길이 무관)
-- `3.14` 같은 소수점은 문장 끝으로 보지 않음
-- 문장부호 없이 `_SOFT_FLUSH_LEN`(88자)을 넘으면 마지막 쉼표에서 절단
-- `_HARD_FLUSH_LEN`(128자)을 넘으면 강제 절단
-
-88/128은 64/96에서 올린 값입니다. 한 덩어리를 더 모아 자연스럽게 읽히게 하는 대신
-지연을 조금 내준 것이므로, 지연이 우선이면 다시 내리면 됩니다.
-절단할 때마다 `sanitize_spoken_text()`를 통과시킵니다.
-
----
-
-## 5. 실행 방법
+키는 `backend/.env` 한 파일에만 둡니다. `ai/.env`를 만들면 `config.py`가 그 파일을 먼저 읽어 값이 갈립니다.
+Windows에서는 명령 앞에 `PYTHONUTF8=1 PYTHONIOENCODING=utf-8`을 붙입니다.
 
 ```bash
 # 저장소 루트에서
-pip install -e .                    # pyproject.toml — test-stt, test-latency 스크립트 등록
-
-python -m ai.test_stt               # 마이크 → Deepgram 스트리밍 확인 (음성 출력 없음)
-python -m ai.test_latency           # 타이핑 입력 모드
-python -m ai.test_latency --mic     # 마이크 입력 — 발화 종료 → 첫 TTS 바이트 측정
-python -m ai.prerender --dry-run    # 미리 합성할 대사 목록 (--dry-run 빼면 실제 합성)
-python -m ai.script_eval --logs app.log   # 대본 모드 적중률
+python -m pytest ai/tests                                                    # AI 테스트
+python -m ai.managed_agent context --scenario investigation_unit             # 통화별 지시문과 글자 수
+python -m ai.managed_agent sync --dry-run                                    # 에이전트에 보낼 내용만 보기
+python -m ai.managed_agent sync --variant external_tts                       # 에이전트 갱신 (최신 develop에서만)
+python -m ai.managed_agent list --variant external_tts                       # 에이전트 id, 안전 규칙 누락 여부
+python -m ai.managed_agent call --to 010XXXXXXXX --scenario card_delivery --wait   # 백엔드 없이 시험 통화
+python -m ai.transcript show <callId> --scenario card_delivery --summary          # 녹취록, 화자 판정, 안전 감사
 ```
 
-`python -m ai`는 `test_latency`로 연결됩니다(`__main__.py`).
+에이전트 운영 절차, 시험 통화 평가표, 콘솔 전용 설정(무응답 처리 등)은 [`ai/MANAGED_AGENT.md`](ai/MANAGED_AGENT.md)에 있습니다.
 
-**목표: 발화 종료 → 첫 오디오 바이트 1,000ms 미만.**
+## 환경변수
 
-측정 하네스는 실행 시 어떤 공급자·모델을 재는지 첫 줄에 출력합니다.
-이전 버전은 `AsyncOpenAI`를 직접 만들어 `CALL_LLM_PROVIDER=gemini`인데도 **항상 OpenAI를
-측정**했습니다. 즉 프로덕션 경로를 한 번도 재지 못했습니다. 지금은 `config.call_llm_provider()`를
-따라갑니다.
+AI와 관련된 것만 적었습니다. 전체 목록은 [`backend/.env.example`](backend/.env.example)에 있습니다.
 
----
-
-## 6. 환경변수
-
-`config.py`는 `ai/.env`를 먼저 읽고, 없는 값만 `backend/.env`에서 채웁니다(`override=False`).
-
-> **`ai/.env`를 새로 만들지 마세요.** 2026-09-05에 `backend/.env` 단일 파일로 통합했습니다.
-> `ai/.env`가 있으면 `config.py`가 그걸 먼저 읽어 진입점마다 값이 갈립니다.
-> 실제로 그 때문에 `ELEVENLABS_MODEL_ID`가 코드 기본값과 다르게 잡혀, 전화 TTS가
-> 저지연 모델이 아니라 품질 우선 모델로 돌고 있었던 적이 있습니다.
-
-| 그룹 | 변수 | 기본값 |
+| 변수 | 쓰임 | 기본값 |
 | --- | --- | --- |
-| 공급자 | `CALL_LLM_PROVIDER` | `openai` |
-| | `OPENAI_MODEL` / `GEMINI_MODEL` | `gpt-4o-mini` / `gemini-3.5-flash-lite` |
-| STT | `DEEPGRAM_MODEL` · `DEEPGRAM_LANGUAGE` | `nova-2` · `ko` |
-| | `STT_SAMPLE_RATE` | `16000` |
-| | `STT_ENDPOINTING_MS` | `300` — **체감 지연의 실질적 하한** |
-| | `STT_UTTERANCE_END_MS` | `1000` — `speech_final`이 안 올 때의 백스톱 |
-| TTS | `ELEVENLABS_MODEL_ID` | `eleven_flash_v2_5` |
-| | `ELEVENLABS_VOICE_ID` | 비우면 시나리오별 배정 사용 |
-| | `ELEVENLABS_OUTPUT_FORMAT` · `_SAMPLE_RATE` | `pcm_24000` · `24000` |
-| 시나리오 | `CALL_SCENARIO` | 비우면 매 통화 무작위 선택 |
-| 대본 모드 | `CALL_SCRIPT_MODE` | `shadow` (`off` / `shadow` / `on`) |
-| | `CALL_PRERENDER` · `TTS_CACHE_DIR` · `ELEVENLABS_PRERENDER_MODEL_ID` | `true` · 임시 폴더 · 실시간 모델과 같게 |
-| 하네스 | `CALL_GUARD_MAX_VIOLATIONS` · `CALL_MAX_SENTENCES` | `3` · `3` |
+| `CLAWOPS_API_KEY` · `CLAWOPS_ACCOUNT_ID` | 에이전트 sync, 발신, 녹취록 | 필수 |
+| `CLAWOPS_PHONE_NUMBER` | CLI 시험 통화의 발신 번호 | |
+| `CALL_AGENT_VARIANT` | `external_tts` · `live` · `ab`(통화마다 무작위) | `external_tts` |
+| `CALL_SCENARIO` · `ANNOUNCED_CALL_SCENARIO` | 모든 통화 / 1차 통화를 한 시나리오로 고정 | 비우면 무작위 |
+| `MANAGED_AGENT_REALTIME_MODEL` | `external_tts` 모델을 강제로 지정 | `gpt-realtime-2.1` |
+| `MANAGED_AGENT_LIVE_BACKEND` | `live` 방식의 업무 모델 | `gpt-5.6-luna` |
+| `OPENAI_API_KEY` · `GEMINI_API_KEY` (`OPENAI_MODEL` · `GEMINI_MODEL`) | 리포트 채점 LLM (백엔드가 씀) | |
 
-`STT_ENDPOINTING_MS`가 진짜 손잡이입니다. 정상 흐름에서 발화는 `speech_final`로 마감되므로
-400 → 300(현재 기본값)은 매 턴 약 100ms, 250까지 내리면 150ms가 산술적으로 그대로 줄어듭니다.
-다만 말이 느린 사람의 문장 중간을 끊을 수 있으니 **실제 훈련자 연령대로 시험한 뒤** 정하세요.
+## 통화에 쓰이지 않는 이전 코드
 
----
+매니지드 에이전트로 옮기기 전에는 서버가 직접 음성을 처리했습니다(Deepgram → LLM → ElevenLabs). 그 경로는 2026-10-06(#71)에 백엔드에서 지웠고, `ai/`에는 그때의 대본 모드 코드가 남아 있습니다. 백엔드 테스트 일부가 아직 이 코드를 검사합니다. 고쳐도 지금 통화는 바뀌지 않습니다.
 
-## 7. 새 시나리오 추가하기
+- `scenarios/script.py` · `scenarios/intents.py` · `scenarios/reflex.py`: 대본 모드의 의도 분류와 즉답표. `Playbook`은 `ScriptReply` 타입만 씁니다.
+- `prerender.py` · `script_eval.py`: 대본 대사 미리 합성, 적중률 측정 CLI
+- `voices.py`: ElevenLabs 목소리 id(`tts_voice_id`). 지금 목소리는 `managed_agent.CARTESIA_VOICES`가 정합니다.
+- `harness.py`의 `CallMonitor` · `GuardedLLM`: 통화 중 문장 감시. `OutputGuard`는 `audit_transcript`가 계속 씁니다.
+- `config.py`의 ElevenLabs · Deepgram 설정
 
-1. `library.py`에 `Playbook`을 한 편 추가하고 `PLAYBOOKS` 튜플에 넣습니다.
-2. `incident`에 시각·대상·금액을 **한글 말로** 못 박습니다. 통화 내내 바뀌면 안 됩니다.
-3. `turn_plan`·`objection_handling`은 대사가 아니라 **행동 지시**로 씁니다.
-4. `examples`에 퓨샷을 넣습니다. 답변은 전부 "짧은 문장 두 개" 길이로 씁니다 —
-   길이는 지시문보다 예시가 훨씬 잘 가르칩니다.
-5. `quick_replies`의 답은 **대화 어느 시점에 나와도 어색하지 않아야** 합니다.
-6. `tts_voice_id`는 `voices.WORKING_VOICE_IDS` 안에서 고릅니다.
-7. `progression`(동의할 때마다 다음 줄)과 `script`(의도별 답변 2개씩)를 씁니다. **그대로 읽히는 대사**이므로 한 줄에 짧은 문장 한두 개만.
-8. `tactics` / `red_flags` / `ideal_trainee_response`는 리포트 채점 기준으로 재사용되므로,
-   `red_flags`에는 `turn_plan`에서 **실제로 드러나는** 위험만 적습니다.
-9. `pytest backend/tests/test_scenario_library.py backend/tests/test_script_mode.py` — 안전 정규식 검사는 자동으로 확장됩니다.
-10. `python -m ai.prerender --scenario <id>`로 대사를 미리 합성해 둡니다.
-
-세트 전체로는 사건 유형·기관 유형·말투·압박 방식이 겹치지 않게 하고 난이도를 고르게 둡니다.
-자세한 기준은 [`scenarios/scenario_generation_guidelines.md`](scenarios/scenario_generation_guidelines.md)에 있습니다.
-
----
+`docs/architecture.md`, `docs/latency.md`, `docs/harness.md`, `docs/script-mode.md`도 이전 방식을 기준으로 쓴 문서입니다.
 
 ## 알려진 제약
 
 | 항목 | 내용 |
 | --- | --- |
-| **Realtime 폴백 경로** | Deepgram/ElevenLabs 키가 없어 음성-음성 모델로 떨어지면 텍스트를 가로챌 지점이 없어 하네스 2·3층이 적용되지 않습니다(프롬프트만). |
-| **`pick_scenario` 상태** | 중복 방지는 프로세스 메모리(`_last_picked_id`)에 있습니다. 워커가 여러 개면 각자 따로 셉니다. |
-| **설정 드리프트** | `.env.example`의 `ELEVENLABS_MODEL_ID`·`GEMINI_MODEL` 값이 코드 기본값 및 측정 결론과 어긋나 있습니다. 무음 통화를 유발할 수 있어 우선 정리 대상입니다. |
+| 통화 중 필터 없음 | 매니지드 에이전트의 말은 우리 코드를 거치지 않고 재생됩니다. 지시문과 통화 후 감사로만 막습니다 |
+| 통화 길이 | [통화 길이]는 모델이 스스로 세는 값이라 정확하지 않습니다 |
+| 콘솔 전용 설정 | 무응답 처리, 첫 인사 끝까지 말하기 등은 API에 없어 sync로 관리되지 않습니다 |
+| 녹취록 | 겹쳐 말한 부분이 빠지거나, 통화 비서의 말이 받는 사람이나 AI의 말로 붙을 수 있습니다 |
+| 시나리오 연속 방지 | `pick_scenario`는 직전 시나리오를 프로세스 메모리에 기억합니다. 서버 워커가 여러 개면 각자 따로 기억합니다 |
+| 카드배송 문자 | AI가 사고 접수 번호를 문자로 보내겠다고 하지만 실제로 문자는 가지 않습니다 |
 
 ## 관련 문서
 
-- [`scenarios/scenario_generation_guidelines.md`](scenarios/scenario_generation_guidelines.md) — 시나리오 작성 규칙
-- [`../docs/latency.md`](../docs/latency.md) — 지연 측정 결과와 개선 이력
-- `../backend/app/training/` — 이 패키지를 전화 경로에 연결하는 어댑터
+- [`ai/MANAGED_AGENT.md`](ai/MANAGED_AGENT.md): 에이전트 운영 절차, 시험 통화, 콘솔 전용 설정
+- [`ai/scenarios/scenario_generation_guidelines.md`](ai/scenarios/scenario_generation_guidelines.md): 시나리오 작성 규칙
+- [`docs/research/voice-phishing-patterns.md`](docs/research/voice-phishing-patterns.md): 실제 보이스피싱 수법과 통계

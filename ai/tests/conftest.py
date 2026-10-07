@@ -1,4 +1,4 @@
-"""Tests for the ai package alone: `python -m pytest ai/tests` from the repo root."""
+"""저장소 루트에서 `python -m pytest ai/tests`로 돌린다."""
 
 import sys
 from pathlib import Path

@@ -1,23 +1,6 @@
-"""What the trainee is doing with one utterance, without an LLM.
+"""훈련자 발화 하나의 의도를 정규식으로 분류한다.
 
-The script router (ai/scenarios/script.py) answers a trainee turn from a
-pre-written line only when it knows what kind of turn it is. This module is
-that knowledge: an ordered table of regular expressions over the handful of
-moves a trainee actually makes on these calls -- agreeing, denying, asking who
-is calling, wanting to call back, refusing to give information, and so on.
-
-It is deliberately a classifier you can read. Every miss in a real call log is
-fixed by adding one alternative to one pattern, and `python -m ai.script_eval`
-prints the utterances that matched nothing so you know which ones to add.
-
-Precision matters more than recall here. A turn that matches nothing goes to
-the live LLM and costs a beat of latency; a turn that matches the wrong intent
-gets a confident answer to a question nobody asked, which is exactly what makes
-a caller sound like a machine. So:
-
-- anything longer than a short answer is not routed (`MAX_ROUTABLE_CHARS`),
-- an utterance that matches two different intents is `ambiguous` and not
-  routed either.
+서버가 직접 음성을 처리하던 대본 모드의 코드다. 지금 통화에는 쓰이지 않고, backend/tests가 검사하고 있어 남겨 두었다.
 """
 
 from __future__ import annotations
@@ -36,24 +19,17 @@ __all__ = [
     "classify",
 ]
 
-# Long answers carry more than one move ("아니 그런 적 없는데 누구시라고요?"),
-# and a pre-written line can only answer one of them. Past this length the
-# live LLM, which reads the whole thing, answers instead.
+# 긴 말에는 의도가 여럿이라 분류하지 않는다.
 MAX_ROUTABLE_CHARS = 30
 
 ACK = "ack"
 
-# The reflex triggers are reused as-is so the two layers can never disagree on
-# what "누구세요" means.
 _REFLEX = dict(REFLEX_TRIGGERS)
 
-# Ordered by priority: when two intents match, the earlier one is reported as
-# the intent (and the turn is flagged ambiguous). Specific moves come before
-# generic ones -- "경찰에 신고할게요" is a threat to report, not a question.
+# 우선순위 순. 둘 이상 맞으면 앞의 것을 의도로 하고 ambiguous로 표시한다.
 INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
-        # The reflex table only fires on the word 피싱/사기 itself; open doubt
-        # ("좀 이상한데", "못 믿겠어요") gets the same answer from a scammer.
+        # "좀 이상한데", "못 믿겠어요" 같은 의심도 같은 답을 받는다.
         "scam_accusation",
         re.compile(
             _REFLEX["scam_accusation"].pattern
@@ -67,7 +43,7 @@ INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
-        # A lone "여보세요" mid-call is checking the line, not a greeting.
+        # 통화 중 "여보세요"는 인사가 아니라 회선 확인이다.
         "not_audible",
         re.compile(_REFLEX["not_audible"].pattern + r"|^\s*여보세요\s*[?.!]?\s*$"),
     ),
@@ -131,14 +107,13 @@ INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         ACK,
-        # "네"/"예" only as whole words: "예전에…" and "어디세요" start with
-        # the same syllable and are not agreement.
+        # "예전에", "어디세요"를 맞장구로 잡지 않게 낱말 단위로만 본다.
         re.compile(
             r"^\s*(?:(?:네|예|응|음|어)+(?![가-힣])|그래(?:요)?|그렇(?:죠|네요|습니다)|"
             r"맞(?:아요|습니다|아)|알겠(?:어요|습니다|어)|그럴게(?:요)?|좋아요|괜찮아요|"
             r"그런데(?:요)?(?![가-힣])|말씀하세요|제\s*이름은|"
             r"저는\s*[가-힣]{2,4}(?:이에요|예요|입니다))|"
-            # surprise that keeps listening: "아 진짜요?", "정말요?"
+            # 놀라며 듣는 말: "아 진짜요?", "정말요?"
             r"^\s*(?:아\s*)?(?:진짜|정말)(?:요)?\s*[?!.]*\s*$"
         ),
     ),
@@ -149,12 +124,7 @@ INTENTS: tuple[str, ...] = tuple(name for name, _pattern in INTENT_PATTERNS)
 
 @dataclass(frozen=True)
 class IntentMatch:
-    """How one utterance was read.
-
-    `intent` is the highest-priority match (or None). `matched` holds every
-    intent that matched, which is how ambiguity is decided: an agreement plus
-    a question ("네 근데 얼마라고요?") is two moves, not one.
-    """
+    """발화 하나의 분류 결과. intent는 우선순위가 가장 높은 의도, matched는 맞은 의도 전부."""
 
     text: str
     intent: str | None
@@ -162,8 +132,7 @@ class IntentMatch:
 
     @property
     def ambiguous(self) -> bool:
-        # A leading "네"/"아니" in front of a real move is how people start a
-        # sentence, not a second intent -- only count the non-ack ones.
+        # 문장 앞의 "네", "아니"는 따로 세지 않는다.
         substantive = [name for name in self.matched if name != ACK]
         return len(set(substantive)) > 1
 

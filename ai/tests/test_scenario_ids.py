@@ -1,9 +1,6 @@
-"""Scenario ids are stored identifiers, not labels.
+"""시나리오 id는 DB(calls.scenario_id), CALL_SCENARIO, 에이전트 이름에 저장된다.
 
-calls.scenario_id rows, CALL_SCENARIO and the managed agent names
-(spc-<id>-<variant>) all hold these strings. Renaming one makes get_scenario()
-quietly fall back to the default playbook, so past calls get re-scored against
-the wrong scam. If this test fails, add the old id to _ALIASES instead.
+id를 바꾸면 예전 통화가 기본 시나리오로 채점된다. 이 테스트가 깨지면 예전 id를 _ALIASES에 넣는다.
 """
 
 from ai import managed_agent as ma
@@ -40,7 +37,7 @@ def test_aliases_are_pinned():
 
 
 def test_agent_name_format_is_pinned():
-    # resolve_agent_id looks agents up by this name; a new format orphans every synced agent
+    # 이름 형식을 바꾸면 sync해 둔 에이전트를 찾지 못한다
     assert ma.agent_name("card_delivery", "external_tts") == (
         "spc-card_delivery-external_tts"
     )

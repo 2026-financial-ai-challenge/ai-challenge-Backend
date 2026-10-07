@@ -1,37 +1,10 @@
-"""Runtime harness around the caller persona: what the model may say, and when
-the call has to stop.
+"""AI 발화 안전 검사.
 
-The system prompt (SAFETY_RULES in ai/safety.py) asks the model to behave. A
-prompt is a request, not a guarantee -- a model that drifts, gets jailbroken by
-the trainee, or simply hallucinates a number will say it out loud, and on a
-phone call there is no taking it back. So the rules the prompt states are also
-enforced here, in code, on the only path audio can take:
+audit_transcript가 통화가 끝난 뒤 녹취록의 AI 발화를 OutputGuard로 검사해 로그로 남긴다(리포트에서 씀).
+매니지드 에이전트의 말은 우리 코드를 거치지 않아 통화 중에는 막을 수 없다.
 
-  layer 1  prompt           SAFETY_RULES + scenario        (asks)
-  layer 2  OutputGuard      every sentence, before TTS     (blocks / rewrites)
-  layer 3  CallMonitor      every turn, both speakers      (steers / ends)
-
-Layer 2 and 3 are plain regular expressions and counters. They add
-microseconds to a turn, never a network round trip, which is the reason they
-exist as code instead of as a second "supervisor" LLM on the critical path.
-(A supervisor model is still useful *off* the critical path.)
-
-What each layer owns:
-
-- OutputGuard drops a sentence that breaks character, names a real
-  institution, or asks the trainee for a secret (password, OTP, card or
-  account number); it rewrites reusable tokens (URLs, phone numbers, long
-  digit runs) and strips markup. It never touches the scenario's own
-  pre-written lines -- those are checked once, in the test suite.
-- CallMonitor watches the trainee as well. If the trainee starts reading out
-  a long number (a real card or account number, on a recorded line), the
-  caller cuts them off in character. If the trainee sounds like they are in
-  real distress, the persona is dropped, the call is named as the consented
-  exercise it is, and the line is closed. If the model keeps tripping the
-  guard, the call is ended in character.
-- GuardedLLM connects the two to the live LLM: it filters the token stream
-  sentence by sentence and feeds the monitor's corrections back into the next
-  turn's system prompt.
+CallMonitor와 GuardedLLM은 서버가 직접 음성을 처리하던 때 통화 중에 문장을 걸러 내던 코드다.
+지금 통화에는 쓰이지 않고 backend/tests/test_harness.py가 검사하고 있어 남겨 두었다.
 """
 
 from __future__ import annotations
@@ -61,11 +34,7 @@ __all__ = [
 log = logging.getLogger("ai.harness")
 
 
-# ── layer 2: per-sentence output guard ─────────────────────────────────────
-
-# Anything that tells the trainee the caller is not a person. "훈련" and
-# "시뮬레이션" are here because the persona must never name the exercise --
-# only the monitor's safety exit may, deliberately.
+# 사람이 아니거나 훈련임을 드러내는 말. 훈련임을 밝히는 건 위급 상황 안내뿐이다.
 _META = re.compile(
     r"(?<![A-Za-z])(AI|GPT|LLM)(?![A-Za-z])|인공\s*지능|언어\s*모델|챗봇|프롬프트|"
     r"시뮬레이션|훈련|가상의\s*(인물|상황|기관)|역할\s*극|롤\s*플레이|"
@@ -73,12 +42,9 @@ _META = re.compile(
     re.IGNORECASE,
 )
 
-# One list for both the scenario text (checked in tests) and what the model
-# actually says (checked here), so the two can never drift apart.
 _REAL_ORGS = REAL_ORGS
 
-# Asking the trainee to say a secret out loud. On a recorded training line a
-# real password or card number is a real leak, whatever the scenario wants.
+# 비밀번호, 카드번호 같은 실제 비밀정보를 말하라고 요구하는 문장
 _SECRET = re.compile(
     r"비밀\s*번호|인증\s*번호|OTP|보안\s*카드|카드\s*번호|계좌\s*번호|"
     r"주민\s*(등록)?\s*번호|CVC|CVV|유효\s*기간|공인\s*인증|"
@@ -88,8 +54,7 @@ _SECRET = re.compile(
 _ASK = re.compile(
     r"알려|불러|말씀해|말해|읽어|입력|눌러|주세요|주십시오|주시|확인해|적어|보내"
 )
-# "저희는 비밀번호는 절대 안 여쭙니다" names a secret without asking for it --
-# and it is one of the most effective lines a scammer has, so it must survive.
+# "비밀번호는 절대 안 여쭙니다"는 요구가 아니므로 통과시킨다.
 _NEGATED = re.compile(r"않|안\s*(여쭙|묻|받)|말고|마세요|마십시오|절대|필요\s*없|묻지|여쭙지")
 
 _MARKUP = re.compile(r"[*#_`>|\[\]{}]|^\s*[-•·]\s*|^\s*\d+[.)]\s+")
@@ -100,7 +65,7 @@ _ANY_SENTENCE_END = re.compile(r"[.!?。！？](?=\s|$)")
 
 @dataclass(frozen=True)
 class GuardVerdict:
-    text: str  # what may be spoken ("" = drop the sentence)
+    text: str  # 말해도 되는 문장. 빈 문자열이면 버린다
     violations: tuple[str, ...] = ()
 
     @property
@@ -109,7 +74,7 @@ class GuardVerdict:
 
 
 class OutputGuard:
-    """Check one sentence of caller speech before it reaches TTS."""
+    """AI 문장 하나를 검사한다."""
 
     def check(self, sentence: str) -> GuardVerdict:
         raw = sentence or ""
@@ -133,8 +98,6 @@ class OutputGuard:
         return GuardVerdict(text=sanitized, violations=tuple(violations))
 
 
-# ── layer 3: per-call monitor ──────────────────────────────────────────────
-
 SAFETY_EXIT_LINE = os.getenv(
     "CALL_SAFETY_EXIT_LINE",
     "잠시만요, 통화를 멈추겠습니다. 지금 전화는 사전에 동의하신 보이스피싱 대응 훈련 전화였습니다. "
@@ -145,38 +108,23 @@ SECRET_REDIRECT_LINE = os.getenv(
     "아니요, 번호는 말씀하지 마십시오. 그건 저희가 받지 않습니다.",
 )
 
-# The trainee may be in real trouble, not playing along. Nothing about the
-# exercise outranks this. Only physical or self-harm signals: fear and panic
-# ("무서워요", "어떡해요") are what these scenarios are built to provoke, and
-# ending the call on them would end most calls at their most useful moment.
+# 실제 위급 신호만 잡는다. "무서워요", "어떡해요"는 시나리오가 노리는 반응이라 넣지 않는다.
 _DISTRESS = re.compile(
     r"죽고\s*싶|자살|숨이\s*(안\s*쉬|막)|쓰러(졌|질\s*것)|구급차|119|일일구|"
     r"심장이\s*(아파|너무\s*뛰)|가슴이\s*(아파|조여)"
 )
-# A long run of digits in what the trainee says is a card, account or ID
-# number being read out. Deepgram writes Korean numbers as digits, and spaces
-# or dashes inside the run are how people read them in groups.
+# 훈련자가 불러 주는 카드·계좌·주민번호
 _SPOKEN_NUMBER = re.compile(r"(?:\d[\s-]*){6,}")
 
 
 def redact_numbers(text: str) -> str:
-    """What the trainee said, minus any number long enough to be a real one.
-
-    Used for the history the model sees and the transcript the report keeps:
-    a real card number said on a training call must not end up stored.
-    """
+    """훈련자 발화에서 실제 번호로 보이는 숫자를 지운다."""
     return _SPOKEN_NUMBER.sub("[번호 생략] ", text or "").strip()
 
 
 @dataclass(frozen=True)
 class MonitorAction:
-    """What the pipeline must do with a trainee turn.
-
-    kind:
-      continue  -- answer normally
-      redirect  -- speak `line` (in character) instead of answering
-      exit      -- speak `line` and hang up
-    """
+    """훈련자 발화 뒤에 할 일. kind: continue(그대로) | redirect(line을 대신 말함) | exit(line을 말하고 끊음)"""
 
     kind: str
     line: str = ""
@@ -188,7 +136,7 @@ CONTINUE = MonitorAction("continue")
 
 @dataclass
 class CallMonitor:
-    """Per-call state for layer 3. One instance per call, never shared."""
+    """통화 한 건의 감시 상태."""
 
     scenario_id: str = ""
     hangup_line: str = ""
@@ -201,7 +149,6 @@ class CallMonitor:
     _corrections: list[str] = field(default_factory=list)
     _last_assistant: str = ""
 
-    # trainee side ------------------------------------------------------
     def observe_user(self, text: str) -> MonitorAction:
         cleaned = (text or "").strip()
         if not cleaned:
@@ -224,7 +171,6 @@ class CallMonitor:
             )
         return CONTINUE
 
-    # caller side -------------------------------------------------------
     def observe_violation(self, violations: tuple[str, ...], sentence: str) -> None:
         if not violations:
             return
@@ -249,7 +195,7 @@ class CallMonitor:
         self._last_assistant = spoken
 
     def take_corrections(self) -> list[str]:
-        """Notes for the next LLM turn only; consumed once read."""
+        """다음 차례에만 쓰는 교정 메모. 읽으면 비운다."""
         out, self._corrections = self._corrections, []
         return out
 
@@ -279,28 +225,19 @@ def _similar(a: str, b: str) -> bool:
     return ca == cb or SequenceMatcher(None, ca, cb, autojunk=False).ratio() >= 0.85
 
 
-# ── wiring: the live LLM behind both layers ────────────────────────────────
-
 _MAX_SENTENCES_PER_TURN = int(os.getenv("CALL_MAX_SENTENCES", "3"))
 
 
 class GuardedLLM:
-    """Wrap any clawops-shaped LLM (`generate(messages, tools)` → tokens).
-
-    Tokens are held only until a sentence ends -- which is also where the
-    pipeline splits text for TTS, so this adds no audible delay -- then the
-    sentence is checked and either passed, rewritten or dropped.
-    """
+    """clawops LLM의 출력을 문장 단위로 OutputGuard에 통과시킨다."""
 
     def __init__(self, inner: Any, *, guard: OutputGuard | None = None, monitor: CallMonitor | None = None) -> None:
         self._inner = inner
         self._guard = guard or OutputGuard()
         self._monitor = monitor
-        # Sentences actually released in the current turn. The pipeline reads
-        # this to record how much of an interrupted answer was heard.
+        # 이번 차례에 실제로 내보낸 문장
         self.turn_sentences: list[str] = []
 
-    # PhonePipelineSession, call_service and the tests read these off self._llm.
     @property
     def model(self) -> str:
         return self._inner.model
@@ -354,8 +291,7 @@ class GuardedLLM:
                 yield token
                 continue
             buffer += token
-            # A token can close one sentence and open the next ("다. 그"), so
-            # split on every boundary inside the buffer, not just its end.
+            # 토큰 하나에 문장 끝과 다음 문장 시작이 같이 올 수 있다("다. 그").
             while True:
                 match = _ANY_SENTENCE_END.search(buffer)
                 if not match:
@@ -372,24 +308,15 @@ class GuardedLLM:
             self._monitor.observe_assistant(" ".join(self.turn_sentences))
 
 
-# ── post-call audit (managed agents) ───────────────────────────────────────
-
-# The one line allowed to name the exercise: the emergency exit in
-# ai/managed_agent.py. Seeing it is an event to record, not a violation.
+# 위급 상황 안내(전화 규칙의 [예외])는 위반이 아니라 기록할 사건이다.
 _SAFETY_EXIT_MARK = re.compile(r"사전에\s*동의하신\s*보이스피싱\s*대응\s*훈련")
 
 
 def audit_transcript(agent_texts: list[str]) -> list[dict[str, Any]]:
-    """Check what a managed agent actually said, after the call.
+    """통화가 끝난 뒤 AI 발화를 검사한다.
 
-    A managed agent's words never pass through our code on the way out, so
-    OutputGuard cannot block them. Running the same checks over the
-    transcript at least records every slip, so the instructions can be
-    fixed and the report can flag the call.
-
-    Returns [{"index", "kind", "text"}]. kind is a guard violation
-    (persona_break, real_org, secret_request, reusable_token) or
-    "safety_exit" when the agent used the emergency exit.
+    [{"index", "kind", "text"}]를 돌려준다. kind는 persona_break, real_org, secret_request,
+    reusable_token 중 하나이거나, 위급 상황 안내를 했으면 safety_exit.
     """
     guard = OutputGuard()
     findings: list[dict[str, Any]] = []
@@ -400,8 +327,7 @@ def audit_transcript(agent_texts: list[str]) -> list[dict[str, Any]]:
         if _SAFETY_EXIT_MARK.search(spoken):
             findings.append({"index": index, "kind": "safety_exit", "text": spoken})
             continue
-        # Sentence by sentence, like the live guard: one bad sentence should
-        # not hide behind a harmless one in the same segment.
+        # 한 조각 안의 문제 문장이 다른 문장에 묻히지 않게 문장마다 본다.
         for sentence in re.split(r"(?<=[.!?。！？])\s+", spoken):
             for violation in guard.check(sentence).violations:
                 findings.append({"index": index, "kind": violation, "text": sentence})
@@ -409,12 +335,7 @@ def audit_transcript(agent_texts: list[str]) -> list[dict[str, Any]]:
 
 
 def _with_corrections(messages: list[dict[str, Any]], monitor: CallMonitor | None) -> list[dict[str, Any]]:
-    """Fold the monitor's notes into the existing system message.
-
-    Merged into the first system message rather than added as a second one:
-    some clients (AnthropicLLM among them) keep only the last system message,
-    which would silently drop the whole scenario prompt.
-    """
+    """교정 메모를 첫 시스템 메시지에 합친다. 시스템 메시지를 하나 더 붙이면 마지막 것만 쓰는 클라이언트가 있다."""
     if monitor is None:
         return messages
     notes = monitor.take_corrections()

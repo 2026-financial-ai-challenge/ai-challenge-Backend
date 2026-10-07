@@ -140,13 +140,12 @@ AI와 관련된 것만 적었습니다. 전체 목록은 [`backend/.env.example`
 
 ## 통화에 쓰이지 않는 이전 코드
 
-매니지드 에이전트로 옮기기 전에는 서버가 직접 음성을 처리했습니다(Deepgram → LLM → ElevenLabs). 그 경로는 2026-10-06(#71)에 백엔드에서 지웠고, `ai/`에는 그때의 대본 모드 코드가 남아 있습니다. 백엔드 테스트 일부가 아직 이 코드를 검사합니다. 고쳐도 지금 통화는 바뀌지 않습니다.
+매니지드 에이전트로 옮기기 전에는 서버가 직접 음성을 처리했습니다(Deepgram → LLM → ElevenLabs). 그 경로는 2026-10-06(#71)에 백엔드에서 지웠고, `ai/`에는 그때의 대본 모드 코드가 남아 있습니다. `backend/tests`가 아직 이 코드를 검사해서 테스트가 쓰는 부분만 남기고, 명령줄 도구와 안 쓰는 함수는 지웠습니다. 고쳐도 지금 통화는 바뀌지 않습니다.
 
 - `scenarios/script.py` · `scenarios/intents.py` · `scenarios/reflex.py`: 대본 모드의 의도 분류와 즉답표. `Playbook`은 `ScriptReply` 타입만 씁니다.
-- `prerender.py` · `script_eval.py`: 대본 대사 미리 합성, 적중률 측정 CLI
+- `prerender.py` · `script_eval.py`: 대본 대사 미리 합성, 적중률 계산
 - `voices.py`: ElevenLabs 목소리 id(`tts_voice_id`). 지금 목소리는 `managed_agent.CARTESIA_VOICES`가 정합니다.
 - `harness.py`의 `CallMonitor` · `GuardedLLM`: 통화 중 문장 감시. `OutputGuard`는 `audit_transcript`가 계속 씁니다.
-- `config.py`의 ElevenLabs · Deepgram 설정
 
 이전 방식의 설계 문서(지연 측정, 하네스, 대본 모드)는 2026-10-07에 `docs/`에서 지웠습니다. git 기록에 남아 있습니다.
 

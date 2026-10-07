@@ -1,15 +1,6 @@
-"""LLM-free instant replies for the handful of trainee lines that never vary.
+""""안 들려요", "누구세요?"처럼 답이 정해진 짧은 말에 고정 답을 고르는 표.
 
-Every live turn normally costs a full LLM round trip before the first TTS byte
-can leave. A few trainee utterances ("안 들려요", "누구세요?") have an answer
-that is fixed by the scenario, so answering them from a table skips the round
-trip entirely.
-
-This is deliberately conservative:
-- Only high-confidence patterns are matched.
-- Each trigger fires at most once per call, so the caller never repeats itself.
-- A per-call budget keeps the conversation LLM-driven; the reflex table is a
-  latency shortcut, not a dialogue engine.
+서버가 직접 음성을 처리하던 대본 모드의 코드다. 지금 통화에는 쓰이지 않고, backend/tests가 검사하고 있어 남겨 두었다.
 """
 
 from __future__ import annotations
@@ -23,20 +14,12 @@ __all__ = [
     "match_trigger",
 ]
 
-# A reflex answers a one-liner ("안 들려요", "누구세요?"). The same words inside
-# a long answer -- "이게 도대체 누구한테 가는 돈인지 설명을 해 보세요" -- are a
-# different intent entirely, and search() cannot tell the two apart, so
-# anything past the length of a one-liner goes to the LLM where it belongs.
-# Answering a paragraph with a canned "가온금융안전원 서동현입니다." is worse
-# than answering it a beat later.
+# 긴 말 안의 같은 단어는 다른 뜻이라 짧은 말만 본다.
 MAX_REFLEX_CHARS = 40
 
-# Ordered: the first pattern that matches wins, so put the more specific
-# intents (a scam accusation) ahead of the generic ones ("누구세요").
+# 먼저 맞는 것이 이긴다. 구체적인 것을 앞에 둔다.
 REFLEX_TRIGGERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
-        # "보이스피싱 아니에요?" — the moment where a real caller answers
-        # instantly and a hesitating one gives itself away.
         "scam_accusation",
         re.compile(r"보이스\s*피싱|보이스피슁|피싱|사기\s*(전화|아니|치|꾼)|스팸"),
     ),
@@ -60,7 +43,7 @@ REFLEX_TRIGGERS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 
 def match_trigger(text: str) -> str | None:
-    """Return the canonical trigger name for a trainee utterance, or None."""
+    """훈련자 발화의 트리거 이름. 없으면 None."""
     cleaned = (text or "").strip()
     if not cleaned or len(cleaned) > MAX_REFLEX_CHARS:
         return None
@@ -71,11 +54,7 @@ def match_trigger(text: str) -> str | None:
 
 
 class ReflexTable:
-    """Per-call bookkeeping over one scenario's quick replies.
-
-    `quick_replies` is the scenario's ((trigger, reply), ...) tuple. `budget`
-    caps how many turns in a whole call may be answered without the LLM.
-    """
+    """통화 한 건의 고정 답 사용 기록. budget은 한 통화에서 고정 답으로 넘길 수 있는 횟수."""
 
     def __init__(
         self,
@@ -96,10 +75,7 @@ class ReflexTable:
         return max(0, self._budget - len(self._used))
 
     def take(self, text: str) -> str | None:
-        """Return a canned reply for `text`, consuming it, or None.
-
-        Returning None means the turn must go to the LLM as usual.
-        """
+        """고정 답을 쓰고 돌려준다. None이면 모델이 답한다."""
         if self.remaining <= 0:
             return None
         trigger = match_trigger(text)

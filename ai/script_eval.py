@@ -9,7 +9,7 @@ Two numbers decide whether the script mode is worth turning on:
 
 Coverage alone is easy to inflate -- widen a regex and it goes up while the
 answers get worse -- so it is only meaningful next to precision. The target
-used in docs/script-mode.md is coverage >= 70% at precision >= 90%.
+was coverage >= 70% at precision >= 90%.
 
 Sources, from best to cheapest:
 

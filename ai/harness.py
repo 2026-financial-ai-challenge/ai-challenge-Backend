@@ -14,8 +14,7 @@ enforced here, in code, on the only path audio can take:
 Layer 2 and 3 are plain regular expressions and counters. They add
 microseconds to a turn, never a network round trip, which is the reason they
 exist as code instead of as a second "supervisor" LLM on the critical path.
-(A supervisor model is still useful *off* the critical path -- see
-docs/harness.md.)
+(A supervisor model is still useful *off* the critical path.)
 
 What each layer owns:
 

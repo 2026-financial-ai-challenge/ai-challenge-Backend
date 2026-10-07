@@ -1,226 +1,145 @@
-# 백엔드 · 인프라 구조
+# 시스템 구조
 
-보이스피싱 대응 훈련 시뮬레이터의 백엔드/인프라 구성 요약입니다.
-참가자에게 AI가 실제 보이스피싱처럼 전화를 걸어 훈련을 진행하고, 통화 내용을 분석해 리포트를 제공합니다.
+보이스피싱 대응 훈련 시뮬레이터의 전체 구조입니다. 참가자가 동의하면 AI가 실제 보이스피싱처럼 전화를 걸고, 통화가 끝나면 녹취록을 채점해 리포트를 보여 줍니다.
 
-> 기준 브랜치: `develop` · 작성일: 2026-09-23
+> 기준: `develop` · 2026-10-07. 세부 내용은 [`backend/README.md`](../backend/README.md)(서버 · 배포)와 [`AI_README.md`](../AI_README.md)(시나리오 · 대화 규칙 · 채점)에 있습니다.
 
----
+## 1. 구성 요소
 
-## 1. 기술 스택
+```
+ 참가자 브라우저 ──▶ 프론트엔드 (Next.js, Vercel) ──/v1/*──▶ 백엔드 (FastAPI, Lightsail 서울)
+                                                              │        │
+                                                   발신 · 문자 │        │ PostgreSQL · Redis
+                                                              ▼        │
+ 참가자 전화 ◀──── 통화 ──── ClawOps 매니지드 에이전트             │
+                         (OpenAI Realtime + Cartesia TTS)         │
+                                  │ 상태 · 녹취록 웹훅             │
+                                  └──────────────────────────────┘
+```
 
 | 영역 | 사용 기술 |
-|---|---|
-| 웹 프레임워크 | FastAPI (Python 3.13) + Uvicorn |
-| DB | PostgreSQL 16 + SQLAlchemy 2.0 + Alembic |
-| 전화 발신 / SMS | ClawOps (`clawops[agent,openai,gemini,deepgram,elevenlabs]`) |
-| STT (음성→텍스트) | Deepgram (`nova-2`, 한국어) |
-| LLM (응답 생성) | OpenAI / Gemini (상호 폴백) |
-| TTS (텍스트→음성) | ElevenLabs (`eleven_flash_v2_5`) |
-| 번호 확인 | OCTOMO API |
-| 배포 | AWS Lightsail 서울 (백엔드 + Postgres + Redis, Docker Compose) |
-| 프론트엔드 | Next.js / Vercel (별도 저장소) |
+| --- | --- |
+| 웹 서버 | FastAPI (Python 3.13) + Uvicorn |
+| DB | PostgreSQL 16 + SQLAlchemy 2 + Alembic |
+| 가입 인증 상태 | Redis (OTP, 재발송 대기, 인증 토큰) |
+| 전화 · 문자 | ClawOps: 매니지드 에이전트 발신, 가입 인증번호 문자, 상태 · 녹취록 웹훅 |
+| 통화 중 AI | ClawOps가 실행. OpenAI Realtime(`gpt-realtime-2.1`)이 듣고 답을 쓰고, Cartesia(`sonic-3.5`)가 말함 |
+| 리포트 채점 | OpenAI, 없으면 Gemini(OpenAI 호환 엔드포인트) |
+| 배포 | AWS Lightsail 서울, Docker Compose(backend · Postgres · Redis · Caddy) |
+| 프론트엔드 | Next.js, Vercel (별도 저장소) |
 
----
+**통화를 서버가 아니라 ClawOps가 진행합니다.** 백엔드는 시나리오와 에이전트를 고르고 통화별 지시문을 만들어 발신 요청만 합니다. 대화 중의 음성 인식, 응답 생성, 음성 합성, 끼어들기 처리는 모두 ClawOps 안에서 일어납니다. 예전에는 서버가 직접 음성을 처리했지만(Deepgram → LLM → ElevenLabs) 2026-10-06(#71)에 그 경로를 지웠습니다.
 
 ## 2. 저장소 구조
 
 ```
 ai-challenge-Backend/
-├── backend/              # FastAPI 애플리케이션 (배포 단위)
+├── backend/            FastAPI 앱 (배포 단위)
 │   ├── app/
-│   │   ├── main.py       # 엔트리포인트: CORS, 라우터 등록, 스케줄러 기동
-│   │   ├── database.py   # SQLAlchemy 엔진/세션
-│   │   ├── models/       # ORM 모델 (10개)
-│   │   ├── routers/      # API 라우트
-│   │   ├── schemas/      # Pydantic 요청/응답 스키마
-│   │   ├── services/     # 비즈니스 로직
-│   │   ├── training/     # 통화 중 실시간 AI 파이프라인 커스터마이징
-│   │   └── dependencies/ # 인증 등 FastAPI 의존성
-│   ├── alembic/          # DB 마이그레이션 (12개)
-│   ├── tests/            # pytest
-│   ├── Dockerfile
-│   ├── compose.yaml      # 로컬 개발용 (backend + Postgres)
-│   └── start.sh          # 컨테이너 시작: 마이그레이션 후 uvicorn 기동
-├── ai/                   # 통화 AI 패키지 (시나리오, TTS/STT 스트림, 로컬 테스트 하네스)
-└── docs/                 # 문서
+│   │   ├── routers/    API 라우트 (auth, consent, session, call, report, webhook)
+│   │   ├── services/   비즈니스 로직 (인증, 통화, 리포트, 불시 전화 예약, 개인정보 파기, 문자)
+│   │   ├── models/     ORM 모델
+│   │   ├── schemas/    요청 · 응답 스키마
+│   │   ├── training/   ai 패키지 연결과 통화 시나리오 선택
+│   │   └── periodic.py 백그라운드 주기 작업의 공통 스레드
+│   ├── alembic/        DB 마이그레이션
+│   └── tests/
+├── ai/                 시나리오, 에이전트 규칙과 sync, 녹취록 화자 판정, 채점 라벨
+└── docs/               이 문서와 보이스피싱 수법 조사(research/)
 ```
 
-`Dockerfile`은 `backend/`를 `/app`으로, `ai/`를 `/packages/ai`로 복사합니다.
+Docker 이미지는 `backend/`를 `/app`으로, `ai/`를 `/packages/ai`로 복사합니다. 백엔드는 `ensure_ai_importable()`로 `ai` 패키지를 찾습니다.
 
----
-
-## 3. API 엔드포인트
+## 3. API
 
 | Method | Endpoint | 설명 |
-|---|---|---|
-| POST | `/v1/auth/signup/otp` | 가입용 SMS 인증번호 발송 |
-| POST | `/v1/auth/signup/verify` | 인증번호 검증 |
+| --- | --- | --- |
+| POST | `/v1/auth/signup/otp` | 가입 인증번호 문자 발송 |
+| POST | `/v1/auth/signup/verify` | 인증번호 확인 |
 | POST | `/v1/auth/signup` | 회원가입 |
 | POST | `/v1/auth/login` | 로그인 |
-| POST | `/v1/consents` | 훈련 참여 동의 제출 |
-| GET | `/v1/sessions` | 내 훈련 세션 목록 |
-| GET | `/v1/sessions/{id}` | 훈련 세션 상세 |
+| POST | `/v1/consents` | 훈련 참여 동의 |
+| GET | `/v1/sessions`, `/v1/sessions/{id}` | 훈련 세션 목록 · 상세 |
 | POST | `/v1/sessions/{id}/calls` | 훈련 통화 시작 |
-| GET | `/v1/sessions/{id}/report` | 훈련 리포트 조회 |
-| POST | `/v1/webhooks/clawops/transcript` | ClawOps 전사 결과 수신 (서명 검증) |
+| GET | `/v1/sessions/{id}/report` | 리포트 조회 |
+| POST | `/v1/webhooks/clawops/status` | 통화 상태 (연결 · 종료) |
+| POST | `/v1/webhooks/clawops/transcript` | 녹취록 (서명 검증) |
 
-> ⚠️ `docs/api-spec.md`는 `/trainings` 기반의 구버전 명세로, 현재 구현과 일치하지 않습니다.
+요청 · 응답 형식은 서버를 띄운 뒤 `/docs`(FastAPI 자동 문서)에서 봅니다.
 
----
-
-## 4. 핵심 도메인 흐름
+## 4. 훈련 흐름
 
 ```
-① 가입      SMS OTP 인증 → 회원가입 (개인정보/불시전화 동의 저장)
-                ↓
-② 세션 생성  훈련 세션(TrainingSession) 생성 + 동의(Consent) 기록
-                ↓
-③ 예고 통화  ClawOps로 발신 → AI가 보이스피싱 시나리오 연기
-                ↓
-④ 리포트    통화 종료 → 전사(transcript) 수집 → 대응 점수 리포트 생성
-                ↓
-⑤ 불시 통화  동의한 경우 30~60분 뒤 무작위 시점에 2차 훈련 자동 발신
+① 가입        문자 인증번호 → 회원가입
+② 동의        훈련 참여 · 불시 전화 동의 → 훈련 세션 생성
+③ 1차 통화    POST /calls → 시나리오 · 에이전트 선택 → ClawOps 발신
+④ 통화 종료   상태 웹훅 → 녹취록 요청 → 녹취록 웹훅 → 화자 구분 → 채점 → 리포트 저장
+⑤ 불시 통화   1차 통화 30~60분 뒤 무작위 시점에 다른 번호로 자동 발신 (실패하면 재시도)
+⑥ 최종 리포트 1차 · 불시 통화를 비교
 ```
 
-세션 상태는 두 축으로 관리됩니다.
+세션 상태는 두 축으로 관리합니다.
 
 - `call_status`: `waiting` → `calling` → `completed` / `missed` / `silent` / `failed`
 - `report_status`: `none` / `pending` / `draft` / `final` / `failed`
 
----
+## 5. 통화 한 건
 
-## 5. 통화 AI 파이프라인
+1. `call_service`가 시나리오를 고릅니다. 기본은 다섯 편 중 무작위이고, `CALL_SCENARIO`로 고정할 수 있습니다.
+2. 에이전트 `spc-<시나리오 id>-external_tts`를 찾고, 통화별 지시문(CallContext, 4,000자 이내)을 만들어 발신합니다.
+3. 에이전트에는 모든 시나리오가 같이 쓰는 공통 규칙(안전, 말투, 전화 규칙)만 들어 있습니다. 공통 규칙은 `python -m ai.managed_agent sync`로 반영하고, 시나리오 내용은 통화마다 지시문으로 보냅니다.
+4. 통화가 끝나면 `report_service`가 녹취록에서 AI 화자를 가려내고, 시나리오의 위험 신호와 행동 라벨을 기준으로 LLM이 채점합니다. 훈련자가 실제로 한 말로 근거가 확인된 행동만 점수에 넣습니다.
 
-통화 시작 시 [`call_service.py`](../backend/app/services/call_service.py)가 **두 가지 경로 중 하나**를 선택합니다.
+시나리오, 공통 규칙, 채점 기준은 [`AI_README.md`](../AI_README.md)에 정리했습니다.
 
-### 경로 A: 커스텀 파이프라인 (기본)
+## 6. 백그라운드 작업
 
-`DEEPGRAM_API_KEY`와 `ELEVENLABS_API_KEY`가 **모두 설정된 경우** 사용됩니다.
+앱이 시작할 때 `main.py`의 lifespan에서 데몬 스레드로 띄웁니다(`periodic.PeriodicWorker`).
 
-```
-전화 음성 → Deepgram STT → OpenAI/Gemini LLM → ElevenLabs TTS → 전화 음성
-                                (상호 폴백)
-```
+| 작업 | 파일 | 주기 | 하는 일 |
+| --- | --- | --- | --- |
+| 불시 전화 | `services/training_scheduler.py` | 30초 | 시간이 된 예약을 발신. 실패하면 5분 뒤 다시 시도(기본 최대 2번) |
+| 개인정보 파기 | `services/data_retention.py` | 6시간 | 가입 30일이 지난 참가자 삭제 |
 
-`PhonePipelineSession`([`app/training/pipeline_session.py`](../backend/app/training/pipeline_session.py))이 ClawOps의 `PipelineSession`을 상속해 통화 품질 로직을 덧붙입니다.
+참가자를 지우면 훈련 세션의 `participant_id`가 `ON DELETE SET NULL`로 끊어집니다. 전화번호와 비밀번호 해시는 사라지고, 세션 · 녹취 · 리포트는 개인을 알 수 없는 상태로 남습니다.
 
-- **인사말 가드**: 첫 3초간 barge-in(말 끊기) 차단 — 시나리오 도입부가 전달되도록
-- **에코 필터**: 자기 TTS 음성이 STT로 되돌아오는 것 차단
-- **턴 병합**: 한 문장이 여러 Deepgram final로 쪼개지는 것을 하나의 발화로 합침
-- **반사 응답**: "안 들려요", "누구세요?" 등은 LLM 없이 시나리오 고정 답변으로 즉답 (지연 감소)
-- **끊기 판정**: 상대가 끊겠다는 의사를 2회 표시하면 마무리 멘트 후 종료
-- **재생 대기**: 마지막 멘트가 실제로 재생될 때까지 기다린 후 hangup
-
-### 경로 B: ClawOps Realtime (폴백)
-
-Deepgram/ElevenLabs 키가 없으면 `OpenAIRealtime` 또는 `GeminiRealtime`으로 전환됩니다.
-ClawOps 에이전트가 STT·LLM·TTS를 통합 처리하며, 목소리는 provider preset(`marin`, `Kore` 등)을 사용합니다.
-
-> 경로 B로 가면 위에 나열한 통화 품질 로직은 적용되지 않습니다.
-
-### 시나리오
-
-`ai/scenarios/`에 고정 시나리오가 정의돼 있으며, 시나리오마다 목소리(`tts_voice_id`)와 톤(`tts_stability` 등)을 다르게 배정할 수 있습니다.
-`DYNAMIC_SCENARIO=true`로 두면 통화 직전에 LLM이 시나리오를 새로 생성합니다(기본값은 `false`, 고정 시나리오 무작위 선택).
-
----
-
-## 6. 백그라운드 스케줄러
-
-앱 기동 시 `main.py`의 lifespan에서 데몬 스레드로 시작됩니다.
-
-| 스케줄러 | 파일 | 주기 | 역할 |
-|---|---|---|---|
-| 불시 훈련 | `services/training_scheduler.py` | 30초 | 예약된 불시 통화를 발신. 실패 시 재시도(기본 2회) |
-| 개인정보 파기 | `services/data_retention.py` | 6시간 | 가입 30일 경과 참가자의 개인정보 삭제 |
-
-**개인정보 파기 동작**: 참가자(`Participant`) 행을 삭제하면 `training_sessions.participant_id`가 FK의 `ON DELETE SET NULL`로 끊어집니다. 전화번호·비밀번호 해시는 사라지고, 훈련 세션·전사·리포트는 개인 식별 정보 없이 통계용으로 남습니다.
-
-> 📌 개인정보 파기 기능은 현재 **working tree에만 존재하며 아직 커밋되지 않았습니다.**
-
----
+서버 워커가 하나라는 전제로 짠 작업입니다. 워커를 늘리면 예약 발신이 겹치지 않게 잠금부터 바꿔야 합니다.
 
 ## 7. 데이터 모델
 
 ```
-Participant (참가자)
-   │  phone_number, password_hash, 동의 플래그, created_at
-   │
-   └─< TrainingSession (훈련 세션)      ※ participant 삭제 시 NULL 처리
-          │  call_status, report_status, current_training_type
-          │
-          ├── Consent           동의 스냅샷
-          ├─< Call              ClawOps 통화 ID, 상태
-          ├─< TranscriptTurn    발화 단위 전사 (source: live | clawops)
-          └─< TrainingReport    대응 점수 리포트 (source: live | clawops)
+Participant          참가자 (전화번호, 비밀번호 해시, 동의 플래그)
+ └─< TrainingSession 훈련 세션 (call_status, report_status, current_training_type)   ※ 참가자 삭제 시 NULL
+       ├── Consent          동의 스냅샷
+       ├─< Call             ClawOps 통화 id, 상태, 시나리오, 에이전트 방식
+       ├─< TranscriptTurn   발화 단위 녹취
+       └─< TrainingReport   리포트 (점수, 위험 · 방어 행동, 요약, 코칭)
 
-PhoneVerification    가입 OTP (단기 만료)
-ScheduledTraining    불시 훈련 예약 (pending/started/completed/failed/cancelled)
-TranscriptEvent      ClawOps 웹훅 원본 (중복 수신 방지용 유니크 제약)
+PhoneVerification    가입 인증번호 기록
+ScheduledTraining    불시 전화 예약 (pending / started / completed / failed / cancelled)
+TranscriptEvent      ClawOps 웹훅 원본 (중복 수신 방지)
 ```
-
----
 
 ## 8. 인프라
 
-### 로컬 개발
-
-```bash
-cd backend
-cp .env.example .env    # 값 채우기
-docker compose up --build
-```
-
-`compose.yaml`이 두 컨테이너를 띄웁니다.
-
-- `backend` — 8000번 포트, `UVICORN_RELOAD=1`로 코드 변경 시 자동 리로드
-- `db` — PostgreSQL 16, 호스트 **5433**번 포트 (로컬 Postgres와 충돌 방지)
-
-테스트는 `DATABASE_URL`이 가리키는 DB 이름 뒤에 `_test`를 붙인 별도 DB에서 실행됩니다.
-`conftest.py`가 운영 DB를 가리키고 있으면 실행을 거부하도록 안전장치가 걸려 있습니다.
-
-### 배포 (AWS Lightsail 서울)
-
-- ClawOps가 국외 IP의 문자 발송을 거부하므로 **한국 리전**이어야 합니다 (Railway에서 옮긴 이유)
-- 서버 한 대에서 `compose.prod.yaml`로 backend · Postgres · Redis · Caddy를 함께 띄웁니다
-- Caddy가 `DOMAIN`(예: `<IP 하이픈>.sslip.io`)의 HTTPS 인증서를 자동 발급하고 백엔드로 넘깁니다
-- 컨테이너 시작 시 `start.sh`가 `alembic upgrade head`를 최대 10회 재시도한 뒤 uvicorn 기동
-- 절차는 [`backend/README.md`](../backend/README.md#배포)의 배포 섹션 참고
-
-### 프론트엔드 연동
-
-Next.js 프론트엔드는 Vercel에 배포되며, `next.config.mjs`의 rewrite가 `/v1/*`를 백엔드로 프록시합니다.
-백엔드는 `main.py`의 `CORSMiddleware`로 허용 origin을 관리합니다.
-
-> ⚠️ **현재 `allow_origins`에 localhost만 등록돼 있습니다.** 배포된 프론트엔드에서 백엔드를 직접 호출하면 CORS 차단됩니다.
-> Vercel preview 배포는 PR마다 URL이 바뀌므로, `allow_origin_regex` 또는 환경변수 주입 방식을 권장합니다.
-
----
+- **로컬:** `backend/`에서 `docker compose up --build`. backend(8000), Redis, Postgres(호스트 5433)를 띄우고 코드가 바뀌면 다시 읽습니다.
+- **배포:** `develop`에 push하면 GitHub Actions가 Lightsail 서버에 SSH로 들어가 `docker compose -f compose.prod.yaml up -d --build`를 실행합니다. 컨테이너가 시작할 때 `start.sh`가 마이그레이션을 최대 10회 재시도한 뒤 서버를 띄웁니다. Caddy가 HTTPS를 맡습니다.
+- **리전:** ClawOps가 국외 IP의 문자 발송을 막으므로 서버는 한국 리전이어야 합니다.
+- **CORS:** 운영 · 미리보기 Vercel 주소와 localhost를 허용합니다. 더 필요하면 `CORS_ALLOWED_ORIGINS`에 넣습니다.
+- **ClawOps 에이전트:** sync는 최신 `develop` 코드로만 돌립니다. 무응답 처리처럼 API에 없는 설정은 콘솔에서 따로 관리합니다([`ai/MANAGED_AGENT.md`](../ai/MANAGED_AGENT.md)).
 
 ## 9. 환경변수
 
-전체 목록과 설명은 [`backend/.env.example`](../backend/.env.example)에 정리돼 있습니다. 핵심만 추리면:
+`backend/.env` 하나만 씁니다(`ai/.env`는 만들지 않습니다). 전체 목록은 [`backend/.env.example`](../backend/.env.example)에 있습니다.
 
 | 변수 | 용도 |
-|---|---|
-| `DATABASE_URL` | DB 연결 (필수, 배포에서는 `compose.prod.yaml`이 채움) |
-| `JWT_SECRET` | 인증 토큰 서명 |
-| `CLAWOPS_API_KEY` / `_ACCOUNT_ID` / `_SMS_FROM` | SMS 발송 |
-| `CLAWOPS_PHONE_NUMBER` / `_UNANNOUNCED_PHONE_NUMBER` | 예고/불시 통화 발신번호 (분리 운영) |
-| `CLAWOPS_WEBHOOK_SIGNING_SECRET` | 웹훅 서명 검증 |
-| `DEEPGRAM_API_KEY` / `ELEVENLABS_API_KEY` | 통화 파이프라인 (없으면 Realtime 폴백) |
-| `OPENAI_API_KEY` / `GEMINI_API_KEY` | LLM (`CALL_LLM_PROVIDER`로 1순위 지정) |
-| `PARTICIPANT_RETENTION_DAYS` | 개인정보 보존 기간 (기본 30) |
-
-`backend/.env` 하나가 유일한 env 파일입니다. `ai/.env`를 다시 만들면 진입점마다 값이 갈리므로 만들지 마십시오.
-
----
-
-## 10. 알려진 이슈
-
-| 이슈 | 상태 |
-|---|---|
-| CORS에 배포 프론트엔드 origin 미등록 | `d44e676` 커밋에서 제거됨 |
-| `docs/api-spec.md`가 구버전 명세 | 현재 구현과 불일치 |
-| 개인정보 파기 기능 미커밋 | working tree에만 존재 |
+| --- | --- |
+| `DATABASE_URL` · `REDIS_URL` | DB · Redis (운영에서는 `compose.prod.yaml`이 채움) |
+| `JWT_SECRET` | 로그인 토큰 서명 |
+| `CLAWOPS_API_KEY` · `CLAWOPS_ACCOUNT_ID` | ClawOps 인증 |
+| `CLAWOPS_PHONE_NUMBER` · `CLAWOPS_UNANNOUNCED_PHONE_NUMBER` | 1차 · 불시 통화 발신 번호 |
+| `CLAWOPS_SMS_FROM` | 가입 인증번호 발신 번호 |
+| `CLAWOPS_WEBHOOK_SIGNING_SECRET` · `PUBLIC_BASE_URL` | 웹훅 서명 검증 · 상태 웹훅 받을 주소 |
+| `CALL_AGENT_VARIANT` · `CALL_SCENARIO` | 에이전트 방식 · 시나리오 고정 |
+| `OPENAI_API_KEY` · `GEMINI_API_KEY` | 리포트 채점 LLM |
+| `UNANNOUNCED_CALL_*` · `PARTICIPANT_RETENTION_DAYS` | 불시 전화 시점 · 재시도, 개인정보 보존 기간 |

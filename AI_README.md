@@ -148,7 +148,7 @@ AI와 관련된 것만 적었습니다. 전체 목록은 [`backend/.env.example`
 - `harness.py`의 `CallMonitor` · `GuardedLLM`: 통화 중 문장 감시. `OutputGuard`는 `audit_transcript`가 계속 씁니다.
 - `config.py`의 ElevenLabs · Deepgram 설정
 
-`docs/architecture.md`, `docs/latency.md`, `docs/harness.md`, `docs/script-mode.md`도 이전 방식을 기준으로 쓴 문서입니다.
+이전 방식의 설계 문서(지연 측정, 하네스, 대본 모드)는 2026-10-07에 `docs/`에서 지웠습니다. git 기록에 남아 있습니다.
 
 ## 알려진 제약
 
@@ -163,6 +163,7 @@ AI와 관련된 것만 적었습니다. 전체 목록은 [`backend/.env.example`
 
 ## 관련 문서
 
+- [`docs/architecture.md`](docs/architecture.md): 전체 시스템 구조
 - [`ai/MANAGED_AGENT.md`](ai/MANAGED_AGENT.md): 에이전트 운영 절차, 시험 통화, 콘솔 전용 설정
 - [`ai/scenarios/scenario_generation_guidelines.md`](ai/scenarios/scenario_generation_guidelines.md): 시나리오 작성 규칙
 - [`docs/research/voice-phishing-patterns.md`](docs/research/voice-phishing-patterns.md): 실제 보이스피싱 수법과 통계

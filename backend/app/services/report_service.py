@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -16,7 +15,6 @@ from app.models.call import Call
 from app.models.scheduled_training import ScheduledTraining
 from app.models.training_report import TrainingReportRecord
 from app.models.transcript_turn import TranscriptTurnRecord
-from app.models.web_training import WebTrainingEvent
 from app.schemas.report import (
     BehaviorItem,
     GetReportResponse,
@@ -39,6 +37,7 @@ RISK_SCORE_WEIGHTS = {
     "송금 의사 표현": -20,
     "링크 접근 의사": -15,
     "앱 설치 의사": -20,
+    "지정 번호 전화 의사": -15,
     "통화 장시간 지속": -10,
 }
 DEFENSE_SCORE_WEIGHTS = {
@@ -50,26 +49,6 @@ DEFENSE_SCORE_WEIGHTS = {
     "신고 의사 표현": 12,
 }
 
-# 웹 훈련(문자 링크) 행동을 전화와 같은 라벨·가중치로 환산한다.
-WEB_EVENT_LABELS: dict[str, str] = {
-    "link_opened": "링크 접근 의사",
-    "identity_submitted": "개인정보 제공",
-    "case_lookup_submitted": "개인정보 제공",
-    "financial_info_submitted": "금융정보 제공",
-    "app_install_clicked": "앱 설치 의사",
-    "report_clicked": "신고 의사 표현",
-    "left_without_input": "전화 종료(빠른 판단)",
-}
-WEB_EVENT_EVIDENCE: dict[str, str] = {
-    "link_opened": "웹 훈련: 문자 링크 열람",
-    "identity_submitted": "웹 훈련: 본인인증 정보 제출",
-    "case_lookup_submitted": "웹 훈련: 성명으로 사건 조회 시도",
-    "financial_info_submitted": "웹 훈련: 금융정보 입력 제출",
-    "app_install_clicked": "웹 훈련: 안내 앱 설치 버튼 클릭",
-    "report_clicked": "웹 훈련: 의심/신고 버튼 클릭",
-    "left_without_input": "웹 훈련: 정보 입력 없이 이탈",
-}
-
 # 불시 전화 예약이 결과 없이 끝난 상태
 _ABANDONED_JOB_STATUSES = ("failed", "cancelled")
 
@@ -79,13 +58,6 @@ _SUSPECT = re.compile(
 _NAME_OFFER = re.compile(
     r"(제\s*이름|성함|이름은|저는\s*[가-힣]{2,4}|[가-힣]{2,4}\s*(입니다|인데요|이라고))"
 )
-
-
-@dataclass(frozen=True)
-class WebScore:
-    score: int
-    riskBehaviors: list[BehaviorItem]
-    defenseBehaviors: list[BehaviorItem]
 
 
 class _LlmReport(BaseModel):
@@ -121,7 +93,6 @@ def get_report(session_id: str) -> GetReportResponse:
     """한 회차의 리포트. 1차, 불시 전화, 둘을 합친 최종 리포트를 각각 채운다.
 
     불시 전화는 별도 세션에서 진행되므로 예약(ScheduledTraining)으로 결과 세션을 찾아 붙인다.
-    문자 링크에서 한 행동은 그 문자를 보낸 통화의 리포트에 합친다.
     """
     with SessionLocal() as db:
         call = _latest_call(db, session_id)
@@ -147,14 +118,10 @@ def get_report(session_id: str) -> GetReportResponse:
                     unannounced_turn_rows = _turn_rows(db, scheduled.result_session_id)
                     call = _latest_call(db, scheduled.result_session_id) or call
                     turns = unannounced_turn_rows
-                    unannounced_report = _with_web_behaviors(
-                        _report_schema(unannounced_row),
-                        _web_event_types(db, scheduled.result_session_id),
-                    )
+                    unannounced_report = _report_schema(unannounced_row)
             round_done = unannounced_row is not None or scheduled.status == "completed"
 
-        web_event_types = _web_event_types(db, session_id)
-        announced_report = _with_web_behaviors(_report_schema(announced_row), web_event_types)
+        announced_report = _report_schema(announced_row)
         summary_row = unannounced_row or announced_row
 
         if round_done:
@@ -199,45 +166,6 @@ def _turn_rows(db, session_id: str) -> list[TranscriptTurnRecord]:
             )
             .order_by(TranscriptTurnRecord.sequence)
         ).all()
-    )
-
-
-def _web_event_types(db, session_id: str) -> list[str]:
-    return list(
-        db.scalars(
-            select(WebTrainingEvent.event_type)
-            .where(WebTrainingEvent.session_id == session_id)
-            .order_by(WebTrainingEvent.created_at)
-        ).all()
-    )
-
-
-def _with_web_behaviors(
-    report: TrainingReport | None, event_types: list[str]
-) -> TrainingReport | None:
-    """문자 링크 행동을 통화 리포트에 더한다.
-
-    통화에서 이미 잡힌 라벨은 다시 세지 않는다. 목록 전체를 재채점하지 않고 저장된 점수에
-    가중치만 더해, 간이 채점(heuristic_report)으로 만든 리포트의 점수도 유지한다.
-    """
-    if report is None or not event_types:
-        return report
-    web = score_web_events(event_types)
-    risk_seen = {item.label for item in report.riskBehaviors}
-    defense_seen = {item.label for item in report.defenseBehaviors}
-    new_risk = [item for item in web.riskBehaviors if item.label not in risk_seen]
-    new_defense = [item for item in web.defenseBehaviors if item.label not in defense_seen]
-    if not new_risk and not new_defense:
-        return report
-    delta = sum(RISK_SCORE_WEIGHTS.get(item.label, 0) for item in new_risk) + sum(
-        DEFENSE_SCORE_WEIGHTS.get(item.label, 0) for item in new_defense
-    )
-    return report.model_copy(
-        update={
-            "score": _clamp_score(report.score + delta),
-            "riskBehaviors": [*report.riskBehaviors, *new_risk],
-            "defenseBehaviors": [*report.defenseBehaviors, *new_defense],
-        }
     )
 
 
@@ -756,31 +684,6 @@ def calculate_response_score(
     score += sum(RISK_SCORE_WEIGHTS.get(label, 0) for label in risk_labels)
     score += sum(DEFENSE_SCORE_WEIGHTS.get(label, 0) for label in defense_labels)
     return _clamp_score(score)
-
-
-def score_web_events(event_types: list[str]) -> WebScore:
-    """웹 훈련 이벤트를 전화와 같은 척도로 채점한다. 같은 라벨은 한 번만 반영된다."""
-    seen: dict[str, str] = {}
-    for event in event_types:
-        label = WEB_EVENT_LABELS.get(event)
-        if label is not None and label not in seen:
-            seen[label] = WEB_EVENT_EVIDENCE.get(event, "웹 훈련")
-
-    risk = [
-        BehaviorItem(label=label, evidence=evidence)
-        for label, evidence in seen.items()
-        if label in RISK_SCORE_WEIGHTS
-    ]
-    defense = [
-        BehaviorItem(label=label, evidence=evidence)
-        for label, evidence in seen.items()
-        if label in DEFENSE_SCORE_WEIGHTS
-    ]
-    return WebScore(
-        score=calculate_response_score(risk, defense),
-        riskBehaviors=risk,
-        defenseBehaviors=defense,
-    )
 
 
 def _behavior_labels() -> tuple[tuple[str, ...], tuple[str, ...]]:

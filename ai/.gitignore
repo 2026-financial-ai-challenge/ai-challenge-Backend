@@ -7,5 +7,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
-# .env.bak 같은 변형도 막는다. 실제 키가 든 백업 파일이 커밋될 뻔한 적이 있다.
+# .env.bak, .env.local 같은 변형도 모두 무시한다. 키가 든 백업 파일이 올라가지 않게.
 .env.*
+!.env.example

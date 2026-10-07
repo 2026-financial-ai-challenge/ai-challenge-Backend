@@ -1,8 +1,7 @@
-"""ClawOps 녹취록에서 어느 화자가 AI인지 찾는다.
+"""녹취록 화자 판정(AI / 훈련자).
 
-녹취록 화자는 speaker_0, speaker_1처럼 붙고 어느 쪽이 AI인지는 보장되지 않는다.
-잘못 붙이면 AI의 말로 훈련자를 채점하게 된다. AI는 [첫 마디]를 그대로 말하고
-나머지도 시나리오 대사와 비슷하게 말하므로, 시나리오와 가장 닮은 화자를 AI로 본다.
+ClawOps 녹취록은 speaker_0, speaker_1로만 나오고 역할 매핑은 보장되지 않는다.
+시나리오 대사, 특히 그대로 말하는 첫 마디와 가장 비슷한 쪽을 AI로 본다.
 
     python -m ai.transcript show <callId> --scenario bank_security_hold
 """
@@ -21,8 +20,7 @@ if __package__ in (None, ""):
 
 __all__ = ["identify_agent_speaker", "label_roles", "segment_speaker", "segment_text"]
 
-# 첫 마디와 이만큼은 닮아야 하고, 1등과 2등의 차이가 _MIN_MARGIN보다 작으면 판단하지 않는다.
-# 잘못 고르는 것보다 None이 낫다.
+# 점수 차가 이보다 작으면 판정하지 않는다(오판보다 None이 낫다).
 _MIN_OPENING_MATCH = 0.45
 _MIN_MARGIN = 0.12
 
@@ -73,11 +71,11 @@ def _reference_lines(scenario) -> tuple[str, list[str]]:
 
 
 def identify_agent_speaker(segments: Iterable[Any], scenario) -> str | None:
-    """AI 화자 id. 가릴 수 없으면 None.
+    """AI 화자 id. 판정 못 하면 None.
 
-    1. 옛 형식의 AGENT 화자가 있으면 그대로 쓴다.
-    2. [첫 마디]를 말한 화자. 첫 마디가 구간 여러 개로 나뉘기도 해서 처음 세 구간을 이어 본다.
-    3. 그래도 모르면 시나리오 대사와 겹치는 표현이 가장 많은 화자.
+    1. 이전 포맷의 AGENT 화자는 그대로 사용
+    2. 첫 마디를 말한 쪽(조각날 수 있어 처음 세 조각을 합쳐 비교)
+    3. 그래도 애매하면 시나리오 대사와 겹치는 표현이 가장 많은 쪽
     """
     segs = [s for s in segments if segment_text(s).strip()]
     speakers: list[str] = []
@@ -107,7 +105,7 @@ def identify_agent_speaker(segments: Iterable[Any], scenario) -> str | None:
         for sp, texts in by_speaker.items():
             head = " ".join(texts[:3])
             best_single = max((_similarity(t, opening) for t in texts[:3]), default=0.0)
-            # 첫 마디 앞에 군말이 붙기도 해서, 첫 마디 길이의 구간을 밀어 가며 가장 비슷한 곳을 본다.
+            # 첫 마디 앞에 군말이 붙을 수 있어 앞부분 안에서 구간을 밀어 가며 본다.
             opening_scores[sp] = max(best_single, _best_window(head, opening))
         winner, top, second = ranked(opening_scores)
         if top >= _MIN_OPENING_MATCH and top - second >= _MIN_MARGIN:
@@ -127,7 +125,7 @@ def identify_agent_speaker(segments: Iterable[Any], scenario) -> str | None:
 
 
 def label_roles(segments: Iterable[Any], agent_speaker: str) -> list[dict[str, str]]:
-    """녹취록 순서대로 [{"role": "assistant"|"user", "text": ...}]."""
+    """녹취 순서대로 [{"role": "assistant"|"user", "text": ...}]."""
     return [
         {"role": "assistant" if segment_speaker(s) == agent_speaker else "user", "text": segment_text(s).strip()}
         for s in segments
@@ -136,7 +134,7 @@ def label_roles(segments: Iterable[Any], agent_speaker: str) -> list[dict[str, s
 
 
 def _main(argv: list[str] | None = None) -> int:
-    import ai.config  # noqa: F401  backend/.env를 읽는다
+    import ai.config  # noqa: F401  backend/.env 로딩
     from ai.harness import audit_transcript
     from ai.managed_agent import ClawOpsREST
     from ai.scenarios import get_scenario

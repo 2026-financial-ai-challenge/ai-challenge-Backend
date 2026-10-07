@@ -62,7 +62,7 @@ async def receive_call_status_webhook(request: Request) -> Response:
     try:
         from app.services.call_service import handle_call_status_event
 
-        await handle_call_status_event(call_id, callback_status=callback_status)
+        await handle_call_status_event(call_id)
     except Exception:
         logger.exception("Failed to apply call status: call_id=%s", call_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

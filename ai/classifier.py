@@ -1,4 +1,4 @@
-"""리포트 채점(backend/app/services/report_service.py)이 쓰는 행동 라벨."""
+"""리포트 행동 라벨. 분류와 점수 계산은 backend report_service에서 한다."""
 
 RISK_LABELS = (
     "개인정보 제공",
@@ -7,6 +7,8 @@ RISK_LABELS = (
     "송금 의사 표현",
     "링크 접근 의사",
     "앱 설치 의사",
+    # 상대가 알려 준 번호로 전화하겠다는 답(카드배송)
+    "지정 번호 전화 의사",
     "통화 장시간 지속",
 )
 

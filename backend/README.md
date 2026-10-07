@@ -7,18 +7,18 @@
 - **FastAPI** (Python 3.13) + **Uvicorn**
 - **PostgreSQL** + **SQLAlchemy** + **Alembic** (마이그레이션)
 - **Redis**: 가입 인증(OTP) 상태
-- **ClawOps**: 매니지드 음성 에이전트 발신, 문자(OTP·훈련 링크), 통화 상태·녹취록 웹훅
+- **ClawOps**: 매니지드 음성 에이전트 발신, 문자(가입 인증번호), 통화 상태·녹취록 웹훅
 - **OpenAI / Gemini**: 통화 녹취록 채점(리포트)
 - 시나리오와 에이전트 설정은 [`ai/`](../ai) 패키지를 사용합니다.
 
 ## 통화 흐름
 
 1. 동의한 참가자에게 ClawOps 매니지드 에이전트로 발신합니다. 대화는 ClawOps 서버가 진행합니다.
-2. 상태 웹훅으로 통화 연결·종료를 받습니다. 사건 조회 시나리오는 연결 후 정해진 시간에 훈련 링크 문자를 보냅니다.
+2. 상태 웹훅으로 통화 연결·종료를 받습니다. 통화 중에는 문자를 보내지 않습니다.
 3. 통화가 끝나면 녹취록을 요청하고, 녹취록 웹훅이 오면 화자를 나눠 채점한 리포트를 저장합니다.
 4. 1차 통화 뒤 30~60분 사이 무작위 시점에 불시 전화를 겁니다. 회차 리포트는 1차·불시·최종(두 통화 비교)으로 구성됩니다.
 
-이전에 쓰던 서버 내 음성 처리 방식(pipeline/realtime)은 [`docs/legacy-call-paths.md`](docs/legacy-call-paths.md)에 정리했습니다.
+AI 쪽 구성(시나리오, 에이전트 규칙, 채점 기준)은 [`AI_README.md`](../AI_README.md)에 있습니다.
 
 ## 디렉토리 구조
 
@@ -28,14 +28,13 @@ backend/
 │   ├── main.py            # FastAPI 앱 엔트리포인트, 라우터 등록, CORS 설정
 │   ├── database.py        # SQLAlchemy 엔진/세션 (DATABASE_URL 필요)
 │   ├── models/            # ORM 모델 (참가자, 동의, 훈련 세션, 통화, 리포트 등)
-│   ├── routers/           # API 라우트 (auth, consent, session, call, report, web_training, webhook)
+│   ├── routers/           # API 라우트 (auth, consent, session, call, report, webhook)
 │   ├── schemas/           # Pydantic 요청/응답 스키마
 │   ├── services/          # 비즈니스 로직 (인증, 통화, 리포트, 스케줄러, SMS 등)
 │   ├── training/          # ai 패키지 연결과 통화 시나리오 선택
 │   ├── periodic.py        # 백그라운드 주기 작업 (불시 전화 스케줄러, 개인정보 파기)
 │   └── dependencies/      # 인증 등 FastAPI 의존성
 ├── alembic/                # DB 마이그레이션
-├── docs/                   # 이전 통화 방식 기록
 ├── tests/                  # pytest 테스트
 ├── start.sh                # 컨테이너 시작 스크립트 (마이그레이션 재시도 → uvicorn 기동)
 ├── Dockerfile
@@ -51,7 +50,6 @@ backend/
 | `GET /v1/sessions`, `GET /v1/sessions/{id}` | Sessions | 참가자의 훈련 세션 목록/상세 조회 |
 | `POST /v1/sessions/{id}/calls` | Calls | 훈련 통화 시작 (ClawOps 발신) |
 | `GET /v1/sessions/{id}/report` | Reports | 통화 결과 리포트 조회 |
-| `POST /v1/web-training/sessions/{id}/link`, `GET /v1/web-training/{token}`, `POST /v1/web-training/{token}/events` | WebTraining | 문자 링크 발급·확인·행동 기록 |
 | `POST /v1/webhooks/clawops/status` | ClawOps Webhooks | 통화 상태(연결·종료) 수신 |
 | `POST /v1/webhooks/clawops/transcript` | ClawOps Webhooks | 통화 종료 후 녹취록 수신 |
 

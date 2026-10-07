@@ -4,8 +4,22 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class ScriptReply:
-    """상대 반응(intent) 하나에 대한 받아치기 예시 문장들."""
+class Scenario:
+    """백엔드용 시나리오. Playbook에서 to_scenario()로 만든다."""
 
-    intent: str
-    lines: tuple[str, ...]
+    id: str
+    name: str
+    opening_line: str
+    system_prompt: str
+    max_turns: int
+    tts_voice_id: str | None = None
+    subtype: str | None = None
+    difficulty: str | None = None
+    tactics: tuple[str, ...] = ()
+    red_flags: tuple[str, ...] = ()
+    ideal_trainee_response: str | None = None
+    # 녹취 화자 판정용(ai/transcript.py)
+    quick_replies: tuple[tuple[str, str], ...] = ()
+    hangup_line: str = ""
+    progression: tuple[str, ...] = ()
+    script: tuple = ()

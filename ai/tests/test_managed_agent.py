@@ -23,9 +23,9 @@ def test_base_instructions_carry_safety_style_and_phone_rules():
 def test_refusal_rule_has_one_answer():
     text = ma.base_instructions()
     assert "포기 경고" in text
-    # 상대가 영어로 말하면 따라 바꾸던 문제
+    # 상대가 영어로 말해도 한국어로 답한다
     assert "한국어로만 말한다" in text
-    # 거절에 다른 대응을 시키는 예전 문장이 남으면 모델이 아무거나 따른다
+    # 거절에 다른 대응을 시키는 문장이 함께 있으면 모델이 아무거나 따른다
     assert "[받아치기]의 거절 대응" not in text
     assert "상대가 거절하든" not in text
     for playbook in PLAYBOOKS:

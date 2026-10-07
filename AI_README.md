@@ -72,7 +72,7 @@
 
 - **고르는 방법:** `CALL_SCENARIO`가 비어 있으면 통화마다 무작위로 고르고, 직전 시나리오는 빼서 연달아 겹치지 않게 합니다(`pick_scenario`). `CALL_SCENARIO`는 모든 통화를, `ANNOUNCED_CALL_SCENARIO`는 1차(예고) 통화만 한 시나리오로 고정합니다.
 - **모르는 id:** 기본 시나리오(`bank_security_hold`)로 넘어가되 요청한 id는 유지합니다. 예전 id(`voice_phishing_training`, `delivery_payment_error`, `family_emergency`)는 `_ALIASES`가 지금 id로 잇습니다.
-- **문자:** 통화 중에는 문자를 보내지 않습니다(2026-10-07에 제거). 시나리오도 문자를 보냈다고 말하지 않습니다. 카드배송만 사고 접수 번호를 "문자로 보내 드리겠다"고 약속하고, 실제 문자는 가지 않습니다.
+- **문자:** 통화 중에는 문자를 보내지 않습니다. 시나리오도 문자를 보냈다고 말하지 않습니다. 카드배송만 사고 접수 번호를 "문자로 보내 드리겠다"고 약속하고, 실제 문자는 가지 않습니다.
 - **작성 규칙:** 새 시나리오를 쓰거나 고칠 때는 [`ai/scenarios/scenario_generation_guidelines.md`](ai/scenarios/scenario_generation_guidelines.md)를 따릅니다. 실제 수법과 통계 근거는 [`docs/research/voice-phishing-patterns.md`](docs/research/voice-phishing-patterns.md)에 있습니다.
 
 ## 안전 장치
@@ -98,7 +98,7 @@ AI가 사기범을 연기하되, 실제 범죄에 다시 쓸 수 있는 내용�
 | --- | --- |
 | 개인정보 제공 · 금융정보 제공 · 상대방 기관명 신뢰 · 송금 의사 표현 · 링크 접근 의사 · 앱 설치 의사 · 지정 번호 전화 의사 · 통화 장시간 지속 | 상대방 신원 확인 · 공식 대표번호 확인 의사 · 개인정보 제공 거절 · 송금 거절 · 전화 종료(빠른 판단) · 신고 의사 표현 |
 
-- `지정 번호 전화 의사`는 카드배송처럼 상대가 알려 주거나 보내 준 번호로 전화하겠다는 대답입니다(2026-10-07 추가).
+- `지정 번호 전화 의사`는 카드배송처럼 상대가 알려 주거나 보내 준 번호로 전화하겠다는 대답입니다.
 - 라벨을 더하면 백엔드 `RISK_SCORE_WEIGHTS`나 `DEFENSE_SCORE_WEIGHTS`에도 가중치를 넣어야 합니다. 없으면 리포트에는 나오지만 점수는 바뀌지 않습니다.
 - LLM을 쓸 수 없거나 훈련자 발화가 없으면 키워드로 간이 채점합니다. 끊으려 했는지는 `hangup.wants_hang_up()`이 판정합니다.
   - 거절("안 할래요", "됐어요")은 끊겠다는 말로 보지 않습니다.
@@ -140,14 +140,12 @@ AI와 관련된 것만 적었습니다. 전체 목록은 [`backend/.env.example`
 
 ## 통화에 쓰이지 않는 이전 코드
 
-매니지드 에이전트로 옮기기 전에는 서버가 직접 음성을 처리했습니다(Deepgram → LLM → ElevenLabs). 그 경로는 2026-10-06(#71)에 백엔드에서 지웠고, `ai/`에는 그때의 대본 모드 코드가 남아 있습니다. `backend/tests`가 아직 이 코드를 검사해서 테스트가 쓰는 부분만 남기고, 명령줄 도구와 안 쓰는 함수는 지웠습니다. 고쳐도 지금 통화는 바뀌지 않습니다.
+매니지드 에이전트로 옮기기 전에는 서버가 직접 음성을 처리했습니다(Deepgram → LLM → ElevenLabs). 그 경로는 백엔드에서 지웠고, `ai/`에는 그때의 대본 모드 코드가 남아 있습니다. `backend/tests`가 아직 이 코드를 검사해서 테스트가 쓰는 부분만 남기고, 명령줄 도구와 안 쓰는 함수는 지웠습니다. 고쳐도 지금 통화는 바뀌지 않습니다.
 
 - `scenarios/script.py` · `scenarios/intents.py` · `scenarios/reflex.py`: 대본 모드의 의도 분류와 즉답표. `Playbook`은 `ScriptReply` 타입만 씁니다.
 - `prerender.py` · `script_eval.py`: 대본 대사 미리 합성, 적중률 계산
 - `voices.py`: ElevenLabs 목소리 id(`tts_voice_id`). 지금 목소리는 `managed_agent.CARTESIA_VOICES`가 정합니다.
 - `harness.py`의 `CallMonitor` · `GuardedLLM`: 통화 중 문장 감시. `OutputGuard`는 `audit_transcript`가 계속 씁니다.
-
-이전 방식의 설계 문서(지연 측정, 하네스, 대본 모드)는 2026-10-07에 `docs/`에서 지웠습니다. git 기록에 남아 있습니다.
 
 ## 알려진 제약
 

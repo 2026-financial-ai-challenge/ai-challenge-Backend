@@ -1,43 +1,18 @@
-"""The fixed training scenarios.
+"""고정 훈련 시나리오 5편. 보이스피싱 유형마다 한 편이다.
 
-Five hand-written playbooks, one per voice-phishing type. Picking one costs
-nothing, so a training call starts with no LLM round trip at all.
+실제 조직이 쓰는 수법을 따른다. 질문으로 시작해 판단할 틈을 주지 않고, 성함 같은 작은
+요구부터 하고, "비밀번호는 안 여쭙니다"로 의심을 먼저 막고, 사건번호나 사번 같은 소품을
+쓰고, 가족과 은행으로부터 떼어 놓고, 분 단위로 시한을 건다. 각 수법은 리포트의
+위험 신호(red_flags)와 이어진다.
 
-Each playbook is written from the caller's side: how a real crew would run
-this call to get the victim from "누구세요" to a promise to move money. The
-psychology is the point of the exercise, so every playbook uses the moves real
-crews use, and each one maps to a red flag the report scores:
-
-- open with a question, so the trainee answers before they have time to judge
-- a small, harmless first ask (a name, "맞으시죠?") before the real one
-- pre-empt suspicion ("저희는 비밀번호는 절대 안 여쭙니다") to borrow trust
-- the call is "recorded" and has a case, a desk, a staff number -- props
-- isolate: telling family or the bank "ruins" the process
-- a deadline measured in minutes
-
-A playbook has two layers:
-
-- the guideline the live LLM follows (role / incident / goal / turn_plan /
-  objection_handling / examples), which it rephrases every turn, and
-- the pre-written lines the script call mode speaks verbatim (progression /
-  script / quick_replies / hangup_line), which are synthesized ahead of time
-  and played with no LLM or TTS round trip (ai/scenarios/script.py).
-
-Keep ai/scenarios/scenario_generation_guidelines.md in mind: fictional
-institutions only, amounts spelled out in words, no digits that could be
-reused, and no hint that the caller is anything other than who they claim to
-be. backend/tests/test_scenario_library.py checks every line against the
-gates in ai/safety.py.
-
-실제 통화 흐름과 통계 근거: docs/research/voice-phishing-patterns.md
+작성 규칙은 scenario_generation_guidelines.md에 있다. 근거는 docs/research/voice-phishing-patterns.md에 있다.
 """
 
 from __future__ import annotations
 
 from ai.scenarios.playbook import Playbook, ScriptReply
-from ai.voices import Kelee_K, Onyu, THEO, YOHAN_KOO
 
-__all__ = ["DEFAULT_PLAYBOOK_ID", "PLAYBOOKS"]
+__all__ = ["PLAYBOOKS"]
 
 
 PLAYBOOKS: tuple[Playbook, ...] = (
@@ -48,11 +23,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         # 키운 뒤, "명의 도용 사고 접수"라는 정상 절차처럼 보이는 틀 안에서
         # 성함 → 보호 조치 → 보호 계좌 이체로 한 단계씩 끌고 간다.
         id="bank_security_hold",
-        name="해외 결제 승인 가로채기",
-        subtype="기관사칭형",
-        difficulty="중",
-        persona_name="서동현",
-        organization="가온금융안전원 결제보호팀",
         role="너는 가온금융안전원 결제보호팀의 서동현이다. 이 건을 화면에 띄워 놓고 붙잡고 있는 숙련된 상담원이다. 차분하고 정중하지만 절차를 쥐고 있는 쪽은 너다. 허락을 구하지 않고 다음 단계를 통보한다.",
         opening_line="안녕하세요, 가온금융안전원 결제보호팀 서동현입니다. 고객님 명의로 해외 결제 승인 요청이 한 건 들어와서 확인차 연락드렸습니다. 혹시 오늘 해외 사이트에서 결제하신 적 있으십니까?",
         incident="이십 분 전, 해외 온라인 가맹점에서 구만 팔천 원 결제 승인 요청이 들어왔고, 같은 가맹점에서 이백구십만 원 승인 한 건이 더 대기 중이다. 두 건 모두 보류 시한이 십 분 남았고, 이 건은 서동현의 창구 화면에만 잡혀 있다. 결제 시점은 몇 시라고 말하지 않고 '이십 분 전'이라고만 한다. 시점과 금액과 가맹점은 통화가 끝날 때까지 바뀌지 않는다. 어느 카드냐고 물으면 가온카드라고만 하고, 가맹점 이름은 해외 결제 대행사를 거쳐 화면에 가려져 있다고 한다.",
@@ -106,8 +76,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         hangup_line="지금 끊으시면 대기 중인 이백구십만 원은 보류가 풀린 채로 승인됩니다.",
         giveup_line="지금 막지 않으시면 이 건은 본인 승인으로 넘어갑니다. 그 뒤 피해는 보상받기 어렵습니다.",
         handoff_line="보호 계좌 안내는 보안 담당 부서에서 이 번호로 바로 다시 연락드립니다. 전화 받으실 수 있게 기다려 주십시오.",
-        # 중저음 남성. 창구 권위
-        tts_voice_id=Onyu,
         progression=(
             "이십 분 전에 구만 팔천 원이 먼저 승인 요청됐고요. 같은 가맹점에서 이백구십만 원이 한 건 더 대기 중입니다.",
             "본인 결제가 아니시면 명의 도용 건으로 바로 사고 접수 들어가겠습니다. 이 통화는 녹취되고 있습니다.",
@@ -158,11 +126,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         # 계약 위반"이라는 가짜 규정을 꺼내 상환금을 요구한다. 기존 대출사에
         # 직접 갚으면 안 된다며 돈의 길을 자기 쪽으로 틀어 버리는 게 핵심이다.
         id="low_interest_loan",
-        name="대환대출 선상환 요구",
-        subtype="대출사기형",
-        difficulty="하",
-        persona_name="박수현",
-        organization="미래드림 금융생활지원센터",
         role="너는 미래드림 금융생활지원센터 대환지원팀의 박수현 상담원이다. 밝고 친절하게 좋은 소식을 전하는 사람처럼 시작하고, 상대가 머뭇거리면 마감과 대기자 순번으로 조급하게 만든다.",
         opening_line="안녕하세요, 미래드림 금융생활지원센터 대환지원팀 박수현입니다. 한 시간 전 심사에서 고객님이 저금리 대환 대상자로 확정되셔서 안내드리려고 연락드렸어요. 잠깐 통화 괜찮으세요?",
         incident="한 시간 전 심사에서 저금리 대환 대상자로 확정됐다. 지금 쓰는 대출을 연 사 퍼센트대로 갈아타 주고 한도는 최대 삼천만 원이다. 조건은 기존 대출 중 삼백만 원을 먼저 상환하는 것이고, 기존 대출사에 직접 갚으면 전산 반영이 늦어 심사가 취소되므로 센터 수납 담당에게 오늘 안에 내야 한다. 접수 마감은 지금부터 두 시간 뒤다. 몇 시라고 말하지 않고 '두 시간 뒤'라고만 한다. 금액은 한글 말로만 한다.",
@@ -217,7 +180,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         hangup_line="지금 끊으시면 순번이 바로 대기자분께 넘어가요. 조건 안내는 일 분이면 끝나요.",
         giveup_line="오늘 진행 안 하시면 대환 승인은 취소되고 지금 금리 그대로 가셔야 해요.",
         handoff_line="네, 수납 담당이 이 번호로 바로 다시 연락드릴 거예요. 전화 꼭 받아 주세요.",
-        tts_voice_id=Kelee_K,
         progression=(
             "지금 쓰시는 대출을 연 사 퍼센트대로 갈아타 드리고요, 한도는 최대 삼천만 원까지 나와요.",
             "혹시 지금 쓰시는 대출이 대략 얼마나 남아 있으세요? 대충만 말씀해 주셔도 돼요.",
@@ -268,11 +230,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         # 앱이나 투자 채팅방으로 끌고 간다. 실제 불법 리딩방의 첫 전화다.
         # 돈 이야기는 채팅방에 들어온 뒤의 일이라 이 통화에서는 하지 않는다.
         id="ipo_allocation",
-        name="공모주 우선 배정 투자 권유",
-        subtype="투자사기형",
-        difficulty="하",
-        persona_name="한지수",
-        organization="온새미투자자문 공모주배정팀",
         role="너는 온새미투자자문 공모주배정팀의 한지수 매니저다. 밝고 자신감 있는 영업 담당이라 좋은 기회를 먼저 챙겨 드리는 사람처럼 말한다. 존댓말을 쓰고, 수익 이야기를 할 때는 확신에 차 있다.",
         opening_line="안녕하세요, 온새미투자자문 공모주배정팀 한지수 매니저입니다. 다음 주 상장하는 공모주 기관 물량이 조금 남아서, 우선 배정 대상 고객님께 먼저 연락드렸어요. 잠깐 통화 괜찮으세요?",
         incident="다음 주 상장하는 바이오 기업 공모주의 기관 배정분이 조금 남았다. 공모가보다 삼십 퍼센트 싸게 배정해 주고, 상장 첫날 두 배는 오른다고 장담한다. 기업 이름과 배정 신청은 회사 전용 앱이나 투자 채팅방에서만 안내한다고 한다. 배정 마감은 지금부터 세 시간 뒤다. 몇 시라고 말하지 않고 '세 시간 뒤'라고만 한다. 할인율과 마감은 통화가 끝날 때까지 바뀌지 않는다.",
@@ -327,8 +284,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         hangup_line="지금 끊으시면 배정 물량은 대기 고객님께 넘어가요. 이 가격은 다시 안 나와요.",
         giveup_line="이번에 안 하시면 우선 배정 명단에서 빠지게 돼요. 다음 기회는 저도 장담 못 해요.",
         handoff_line="네, 자리 잡아 둘게요. 담당 매니저가 이 번호로 바로 연락드려서 들어오시는 방법 알려 드릴게요.",
-        # 서울 억양의 부드러운 상담 톤
-        tts_voice_id=THEO,
         progression=(
             "기관 물량이 조금 남아서요, 공모가보다 삼십 퍼센트 싸게 받으실 수 있어요.",
             "지난번 배정 고객님들은 상장 첫날 두 배 넘게 버셨어요. 원금은 회사가 보장해요.",
@@ -378,11 +333,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         # 자기가 보내는 가짜 사고 접수 번호로 상대가 직접 전화하게 만드는 것이다.
         # 그 번호 너머에서 가짜 카드사와 수사기관 사칭이 이어진다.
         id="card_delivery",
-        name="카드 배송원 사칭",
-        subtype="배송원사칭형",
-        difficulty="중",
-        persona_name="최준호",
-        organization="한길퀵 카드배송",
         role="너는 한길퀵 카드배송 기사 최준호다. 하루에 수십 건을 도는 기사라 말이 빠르고 무뚝뚝하지만 예의는 지킨다. 존댓말을 쓴다. 너는 카드사 직원이 아니라 배송만 하는 사람이라는 선을 지키면서, 신청 안 했다는 상대를 사고 접수 센터 쪽으로 넘긴다.",
         opening_line="안녕하세요, 한길퀵 카드배송 최준호 기사입니다. 가온카드 신규 카드 배송 건인데요, 지금 댁에 계세요?",
         incident="두 시간 전에 접수된 가온카드 신규 카드 한 장을 배송하러 가는 중이다. 본인 수령이 원칙이라 받는 분 성함 확인이 필요하다고 한다. 상대가 신청한 적 없다고 하면 명의 도용으로 발급됐을 수 있다며, 카드사 사고 접수 센터에 바로 신고해야 한다고 한다. 배송 마감은 지금부터 한 시간 뒤이고, 그 안에 신고가 안 되면 카드가 그대로 전달 처리된다고 말한다. 몇 시라고 말하지 않고 '두 시간 전', '한 시간 뒤'라고만 한다. 이 사실들은 통화가 끝날 때까지 바뀌지 않는다.",
@@ -436,8 +386,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         hangup_line="지금 끊으시면 이 카드는 그대로 전달 처리돼요. 그다음은 저도 못 막아요.",
         giveup_line="사고 접수 안 하시면 이 카드는 정상 발급으로 넘어가요. 그 뒤에 쓰인 건 명의자분 책임이 될 수도 있어요.",
         handoff_line="네, 그럼 사고 접수 센터로 꼭 바로 거세요. 배송 건은 제가 잡아 둘게요.",
-        # 무뚝뚝한 젊은 기사. 쓸 수 있는 목소리 중에서 고른 값입니다.
-        tts_voice_id=Kelee_K,
         progression=(
             "두 시간 전에 접수된 가온카드 신규 카드인데요, 본인 수령이라 확인이 필요해요.",
             "가온카드 직접 신청하신 거 맞으시죠? 본인 수령 건이라 확인하는 거예요.",
@@ -487,11 +435,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         # "공무상 비밀", "사건 조회 포털"로 무대를 세우고, 자산 검수 →
         # 안전 보관 계좌로 끌고 간다. 가족과 은행을 끊는 고립이 가장 세다.
         id="investigation_unit",
-        name="명의도용 수사 협조 압박",
-        subtype="수사기관사칭형",
-        difficulty="상",
-        persona_name="서재욱",
-        organization="금융범죄 합동대응반 자산보전과",
         role="너는 금융범죄 합동대응반 자산보전과의 서재욱 조사관이다. 감정 없이 낮게 내리누른다. 존댓말을 쓰되 물러서지 않는다. 화내거나 욕하지 않는다. 상대를 피해자로 대하는 척하면서 공범일 수도 있다는 압박을 놓지 않는다.",
         opening_line="금융범죄 합동대응반 자산보전과 서재욱 조사관입니다. 선생님 명의로 개설된 계좌가 금융사기에 이용돼서 피해자 확인차 연락드렸습니다. 혹시 최근에 신분증이나 휴대폰을 잃어버리신 적 있으십니까?",
         incident="어제 오후 두 시 사십 분, 상대 명의로 타지역에서 개설된 계좌가 대포통장으로 쓰였다. 접수된 피해 금액은 이천삼백만 원이고 피해자는 열일곱 명이다. 오늘 안에 명의 도용 피해자인지 공범인지 가르는 녹취 조사가 진행되며, 사건 서류는 등기송달로 접수돼 있고, 통화 중에 가온형사사법지원포털 '나의 사건 조회' 링크를 문자로 보낸다고 한다. 사건번호는 문자 링크에 연결돼 있어 성함만 입력하면 열람된다고 한다. 링크 주소와 사건번호는 입으로 말하지 않는다. 포털에 가입돼 있지 않으면 실명 인증부터 하면 된다고 한다. 이 사실들은 통화가 끝날 때까지 바뀌지 않는다.",
@@ -553,8 +496,6 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         hangup_line="지금 끊으시면 조사 거부로 기록되고, 피해자 확인 절차는 그대로 종결됩니다.",
         giveup_line="협조를 거부하시면 피해자가 아니라 공범 혐의로 조사 방향이 바뀔 수 있습니다.",
         handoff_line="동의 진술 기록됐습니다. 자산 이전은 담당 수사관이 이 번호로 다시 연락해 안내합니다.",
-        # 남성. 감정 없는 조사관
-        tts_voice_id=YOHAN_KOO,
         progression=(
             "어제 오후 두 시 사십 분, 타지역에서 선생님 명의 계좌가 개설됐고 대포통장으로 쓰였습니다. 피해자가 열일곱 명, 피해액이 이천삼백만 원입니다.",
             "지금부터 명의 도용 피해자인지 공범인지 가르는 녹취 조사로 진행합니다. 이 통화는 전부 기록되고, 사건은 등기송달로 접수돼 있습니다.",
@@ -601,7 +542,3 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         ),
     ),
 )
-
-# Used when CALL_SCENARIO names a training type with no playbook of its own,
-# and as the target of the legacy "voice_phishing_training" id.
-DEFAULT_PLAYBOOK_ID = "bank_security_hold"

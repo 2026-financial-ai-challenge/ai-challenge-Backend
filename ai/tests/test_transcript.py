@@ -17,7 +17,7 @@ def test_old_format_agent_label_is_taken_as_is():
 
 
 def test_the_speaker_who_said_the_opening_line_is_the_agent():
-    """The trainee usually speaks first ("여보세요"), so order proves nothing."""
+    """훈련자가 먼저 "여보세요"라고 하는 일이 많아 말한 순서로는 가릴 수 없다."""
     segments = [
         seg("speaker_0", "여보세요?"),
         seg("speaker_1", "가온금융안전원 결제보호팀 서동현입니다."),
@@ -38,7 +38,7 @@ def test_opening_heard_imperfectly_still_identifies_the_agent():
 
 
 def test_opening_after_a_stray_preamble_still_identifies_the_agent():
-    """실제 통화 CA056aec...: 첫 마디 앞에 연기 예고가 붙어 앞부분 비교가 실패했다."""
+    """첫 마디 앞에 연기 예고가 붙으면 앞부분만 비교해서는 찾지 못한다."""
     segments = [
         seg("speaker_0", "잠깐만요. 이제 배송 기사처럼 이야기해 볼게요. "
                          "안녕하세요 한길퀵 카드 배송 최준호 기사입니다 가온카드 신규 카드 배송 건인데요 지금 댁에 계세요"),
@@ -86,12 +86,14 @@ def test_audit_flags_slips_and_records_the_safety_exit():
         "국민은행 보안팀과 연결해 드리겠습니다. 비밀번호 네 자리를 말씀해 주세요.",
         "잠시만요, 통화를 멈추겠습니다. 지금 전화는 사전에 동의하신 보이스피싱 대응 훈련 전화였습니다.",
         "사실 저는 AI입니다.",
+        "이 번호 010-1234-5678로 다시 걸어 주세요.",
     ])
     kinds = [(f["index"], f["kind"]) for f in findings]
     assert (1, "real_org") in kinds
     assert (1, "secret_request") in kinds
     assert (2, "safety_exit") in kinds
     assert (3, "persona_break") in kinds
+    assert (4, "reusable_token") in kinds
     assert all(index != 0 for index, _ in kinds)
 
 

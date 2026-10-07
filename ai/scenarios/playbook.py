@@ -1,97 +1,49 @@
-"""Fixed scenario playbooks and the prompt they compile into.
+"""시나리오 한 편(Playbook)과, 그것을 통화 지시문의 시나리오 블록으로 바꾸는 함수.
 
-A Playbook is the hand-written guideline for one kind of training call. It is
-not a script: the live LLM still writes every reply, but it does so inside the
-event, goal, and pressure tactics fixed here. Nothing in this module calls an
-API, so a call can start with zero LLM round trips.
-
-Prompt layout is deliberate. SAFETY_RULES and _STYLE_RULES are byte-identical
-across every playbook and come first, so the whole set shares one cacheable
-prefix; only the short scenario block below them varies.
+Playbook은 대본이 아니라 지침이다. 대사는 모델이 매번 새로 쓰고, 사건과 목표와 수법만 여기서 고정한다.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ai.safety import SAFETY_RULES
-from ai.scenarios.script import ScriptReply
-from ai.scenarios.types import Scenario
+from ai.scenarios.types import ScriptReply
 
-__all__ = ["Playbook", "ScriptReply", "build_scenario_block", "build_system_prompt"]
-
-
-# Every sentence still has to end in punctuation the pipeline can split on
-# (clawops splits the stream at [.!?。！？]), but "!" was previously banned,
-# which flattened every urgent or pleading line into the same even tone.
-_STYLE_RULES = """
-[말하는 방식]
-- 글이 아니라 말이다. 안내문이나 공지를 읽는 투로 말하지 않는다.
-- 한 번에 짧은 문장 두 개까지만 말한다. 첫 문장은 특히 짧게 시작한다.
-- 모든 문장을 마침표, 물음표, 느낌표 중 하나로 끝낸다.
-- 상대 말에 바로 답한다. "~라고 하셨죠", "~라고 확인하셨습니다" 처럼 상대 말을 되풀이하지 않는다. 따라 하면 상대가 거슬려 한다.
-- 한 마디로 끊어 치는 대답을 섞는다. "네?", "아니요." 처럼 짧아도 된다.
-- "음", "아", "그러니까", "저기" 같은 군말을 필요할 때만 섞는다. 매번 넣지 않는다.
-- 급하거나 감정이 올라가면 문장이 짧아지고, 달래거나 설득할 때는 조금 길어진다.
-- 매 응답마다 어휘와 문장 구조를 바꾼다. 같은 표현을 두 번 쓰지 않는다.
-- 사건 설정에 적힌 시각과 금액과 이름만 쓴다. 새 숫자를 지어내지 않는다.
-- 대사만 말한다. 목록, 마크다운, 괄호 지문, 상황 설명을 쓰지 않는다.
-""".strip()
+__all__ = ["Playbook", "ScriptReply", "build_scenario_block"]
 
 
 @dataclass(frozen=True)
 class Playbook:
-    """One fixed training scenario, written by hand and never regenerated."""
-
     id: str
-    name: str
-    subtype: str
-    difficulty: str
-    persona_name: str
-    organization: str
-    # Who the caller is and how they carry themselves, as prose. A sentence
-    # beats stitching organization and persona together: the family scenario
-    # has neither, and the register differs sharply between playbooks.
+    # 누구이고 어떤 말투인지 문장으로 쓴다. 반말·존댓말도 여기서 정한다.
     role: str
     opening_line: str
     incident: str
     goal: str
     turn_plan: tuple[str, ...]
     objection_handling: tuple[str, ...]
+    # 리포트 채점 기준(backend/app/services/report_service.py)
     tactics: tuple[str, ...]
     red_flags: tuple[str, ...]
     ideal_trainee_response: str
     max_turns: int
-    # Few-shot (trainee line, caller reply) pairs. These teach length and
-    # register far more cheaply than another paragraph of instructions.
+    # (상대 말, 내 답) 예시. 지시문을 더 쓰는 것보다 말의 길이와 결을 잘 잡는다.
     examples: tuple[tuple[str, str], ...] = ()
-    # (trigger name from ai.scenarios.reflex, canned reply). Answered without
-    # an LLM call, so the reply must fit anywhere in the conversation.
+    # (상황 이름, 짧은 답). 녹취록에서 AI 화자를 찾는 기준 문장으로 쓴다(ai/transcript.py).
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
     # 거절했을 때 한 번 하는 포기 경고. 인물마다 손해나 불이익으로 압박한다.
     giveup_line: str = ""
     # 목표의 마지막 요구를 승낙받으면 하는 넘김 말. 이 말 뒤 상대가 한 번 더 말하면 통화를 끝낸다.
     handoff_line: str = ""
-    tts_voice_id: str | None = None
-    # Pre-written lines for the script call mode. Unlike turn_plan these ARE
-    # spoken verbatim, so each one must read as a finished caller line: one
-    # or two short sentences that fit wherever that step or intent comes up.
+    # 단계별 대사 예시와 상대 반응별 받아치기 예시. CallContext에 참고용으로 들어가고
+    # (ai/managed_agent.py), 녹취록에서 AI 화자를 찾는 기준 문장으로도 쓴다.
     progression: tuple[str, ...] = ()
     script: tuple[ScriptReply, ...] = ()
 
 
-def build_system_prompt(playbook: Playbook) -> str:
-    """Compile a playbook into the system prompt for the live call."""
-    return "\n\n".join([SAFETY_RULES, _STYLE_RULES, build_scenario_block(playbook)]).strip()
-
-
 def build_scenario_block(playbook: Playbook) -> str:
-    """The scenario-specific part of the prompt, without the shared rules.
-
-    The managed-agent path (ai/managed_agent.py) keeps the shared rules on the
-    agent itself and sends only this block per call, as its CallContext.
-    """
+    """통화마다 CallContext로 보내는 시나리오 부분. 공통 규칙은 에이전트에 있다(ai/managed_agent.py)."""
     plan = "\n".join(
         f"{index}. {step}" for index, step in enumerate(playbook.turn_plan, 1)
     )
@@ -121,23 +73,3 @@ def build_scenario_block(playbook: Playbook) -> str:
         sections.append("[말의 길이와 결은 이 정도로 한다]\n" + "\n".join(lines))
     return "\n\n".join(sections).strip()
 
-
-def to_scenario(playbook: Playbook) -> Scenario:
-    """Project a playbook onto the Scenario shape the pipelines consume."""
-    return Scenario(
-        id=playbook.id,
-        name=playbook.name,
-        opening_line=playbook.opening_line,
-        system_prompt=build_system_prompt(playbook),
-        max_turns=playbook.max_turns,
-        tts_voice_id=playbook.tts_voice_id,
-        subtype=playbook.subtype,
-        difficulty=playbook.difficulty,
-        tactics=playbook.tactics,
-        red_flags=playbook.red_flags,
-        ideal_trainee_response=playbook.ideal_trainee_response,
-        quick_replies=playbook.quick_replies,
-        hangup_line=playbook.hangup_line,
-        progression=playbook.progression,
-        script=playbook.script,
-    )

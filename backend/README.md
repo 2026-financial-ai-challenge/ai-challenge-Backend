@@ -28,7 +28,7 @@ backend/
 │   ├── main.py            # FastAPI 앱 엔트리포인트, 라우터 등록, CORS 설정
 │   ├── database.py        # SQLAlchemy 엔진/세션 (DATABASE_URL 필요)
 │   ├── models/            # ORM 모델 (참가자, 동의, 훈련 세션, 통화, 리포트 등)
-│   ├── routers/           # API 라우트 (auth, consent, session, call, report, web_training, webhook)
+│   ├── routers/           # API 라우트 (auth, consent, session, call, report, webhook)
 │   ├── schemas/           # Pydantic 요청/응답 스키마
 │   ├── services/          # 비즈니스 로직 (인증, 통화, 리포트, 스케줄러, SMS 등)
 │   ├── training/          # ai 패키지 연결과 통화 시나리오 선택

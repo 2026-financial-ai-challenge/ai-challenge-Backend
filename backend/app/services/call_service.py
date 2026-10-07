@@ -27,15 +27,12 @@ from app.training.scenarios import ensure_ai_importable, get_runtime_scenario
 
 logger = logging.getLogger(__name__)
 
-# ClawOps 콜백 "이벤트" 이름이다(통화 상태 이름이 아님). answered에서 통화 중 문자 타이머를 건다.
+# ClawOps 콜백 "이벤트" 이름이다(통화 상태 이름이 아님).
 _STATUS_CALLBACK_EVENTS = "ringing answered completed"
 _MISSED_STATUSES = {"no-answer", "busy", "rejected", "canceled"}
 _RINGING_STATUSES = {"queued", "ringing", "in-progress"}
 
 _outbound_lock = Lock()
-# asyncio는 태스크를 약한 참조로만 들고 있어서, 끝날 때까지 여기서 붙잡아 둔다.
-_background_tasks: set[asyncio.Task] = set()
-_mid_call_link_calls: set[str] = set()
 
 
 class CallServiceError(Exception):
@@ -123,7 +120,7 @@ def _status_callback_url() -> str:
     return f"{base}/v1/webhooks/clawops/status"
 
 
-async def handle_call_status_event(call_id: str, *, callback_status: str = "") -> None:
+async def handle_call_status_event(call_id: str) -> None:
     """상태 웹훅 처리. 웹훅 본문 형식은 문서화돼 있지 않아 상태는 API로 다시 조회한다."""
     session_id = session_id_for_call(call_id)
     if session_id is None:
@@ -135,9 +132,6 @@ async def handle_call_status_event(call_id: str, *, callback_status: str = "") -
 
     if status_name in _RINGING_STATUSES:
         update_call_status(session_id, "calling")
-        # answered 직후 조회하면 API가 아직 in-progress가 아닐 수 있어 웹훅 값도 본다.
-        if "in-progress" in {status_name, callback_status}:
-            _schedule_mid_call_link(call_id, session_id)
         return
 
     if status_name == "completed":
@@ -154,7 +148,6 @@ async def handle_call_status_event(call_id: str, *, callback_status: str = "") -
             await request_clawops_transcript(call_id)
         except Exception:
             logger.exception("ClawOps transcript request failed: session_id=%s", session_id)
-        await _dispatch_web_training_link(session_id, _scenario_id_for_call(call_id))
         return
 
     if status_name in _MISSED_STATUSES:
@@ -173,62 +166,6 @@ async def handle_call_status_event(call_id: str, *, callback_status: str = "") -
     logger.warning(
         "Training call failed session=%s status=%s cause=%s", session_id, status_name, cause
     )
-
-
-def _schedule_mid_call_link(call_id: str, session_id: str) -> None:
-    """통화가 연결되면 시나리오에 정해진 시간 뒤에 웹 훈련 링크 문자를 보낸다."""
-    if call_id in _mid_call_link_calls:
-        return
-    scenario_id = _scenario_id_for_call(call_id)
-    try:
-        delay = _mid_call_link_delay(scenario_id)
-    except Exception:
-        logger.exception("Mid-call SMS delay lookup failed: call_id=%s", call_id)
-        return
-    if delay is None:
-        return
-    _mid_call_link_calls.add(call_id)
-
-    async def send_later() -> None:
-        try:
-            await asyncio.sleep(delay)
-            logger.info("Sending mid-call training link session=%s after=%ss", session_id, delay)
-            await _dispatch_web_training_link(session_id, scenario_id)
-        finally:
-            _mid_call_link_calls.discard(call_id)
-
-    task = asyncio.get_running_loop().create_task(send_later())
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-
-def _mid_call_link_delay(scenario_id: str | None) -> int | None:
-    """링크 문자를 보낼 시점(연결 후 초). 링크가 없는 시나리오는 None."""
-    if not scenario_id:
-        return None
-    ensure_ai_importable()
-    from ai.scenarios.portal_link import link_for
-
-    link = link_for(scenario_id)
-    if link is None:
-        return None
-    override = os.getenv("MID_CALL_SMS_DELAY_SEC", "").strip()
-    return max(0, int(override)) if override else link.send_after_seconds
-
-
-async def _dispatch_web_training_link(session_id: str, scenario_id: str | None) -> None:
-    """세션당 한 번만 발송된다. 발송 실패가 통화 처리를 막지 않도록 예외는 기록만 한다."""
-    try:
-        from app.services.web_training_service import dispatch_training_link
-
-        await dispatch_training_link(session_id, scenario_id)
-    except Exception:
-        logger.exception("Web training link dispatch failed: session_id=%s", session_id)
-
-
-def _scenario_id_for_call(call_id: str) -> str | None:
-    with SessionLocal() as db:
-        return db.scalar(select(Call.scenario_id).where(Call.clawops_call_id == call_id))
 
 
 def _complete_call(clawops_call_id: str) -> None:

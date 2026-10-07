@@ -1,6 +1,6 @@
 """시나리오 id는 DB(calls.scenario_id), CALL_SCENARIO, 에이전트 이름에 저장된다.
 
-id를 바꾸면 예전 통화가 기본 시나리오로 채점된다. 이 테스트가 깨지면 예전 id를 _ALIASES에 넣는다.
+id를 바꾸면 기존 통화가 기본 시나리오로 채점된다. 깨지면 이전 id를 _ALIASES에 추가할 것.
 """
 
 from ai import managed_agent as ma
@@ -37,7 +37,7 @@ def test_aliases_are_pinned():
 
 
 def test_agent_name_format_is_pinned():
-    # 이름 형식을 바꾸면 sync해 둔 에이전트를 찾지 못한다
+    # 이름 형식이 바뀌면 기존 에이전트를 못 찾는다
     assert ma.agent_name("card_delivery", "external_tts") == (
         "spc-card_delivery-external_tts"
     )

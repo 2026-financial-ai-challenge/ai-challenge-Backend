@@ -1,7 +1,6 @@
 """고정 대사를 ElevenLabs로 미리 합성해 디스크에 캐시한다.
 
-서버가 직접 음성을 처리하던 대본 모드에서 쓰던 코드다. 지금 통화(ClawOps 매니지드 에이전트)에는
-쓰이지 않고, backend/tests/test_script_mode.py가 검사하고 있어 남겨 두었다.
+예전 대본 모드 코드. 현재 통화에서는 안 쓰고 backend/tests 때문에 남겨 둠.
 """
 
 from __future__ import annotations
@@ -133,7 +132,7 @@ def default_cache() -> TTSCache:
 
 
 async def synthesize_ulaw(spec: VoiceSpec, text: str, *, api_key: str, client) -> bytes:
-    """한 줄을 mu-law 8kHz로 합성한다."""
+    """한 줄을 mu-law 8kHz로 합성."""
     response = await client.post(
         _API.format(voice_id=spec.voice_id),
         params={"output_format": "ulaw_8000"},
@@ -155,7 +154,7 @@ async def ensure_lines(
     concurrency: int = 4,
     client=None,
 ) -> dict[str, bool]:
-    """빠진 줄만 합성해 캐시한다. {줄: 캐시 여부}를 돌려준다. 한 줄이 실패해도 나머지는 계속한다."""
+    """캐시에 없는 줄만 합성. {줄: 캐시 여부} 반환. 실패한 줄은 건너뛴다."""
     cache = cache or default_cache()
     key = api_key if api_key is not None else os.getenv("ELEVENLABS_API_KEY", "").strip()
     result = {line: cache.has(spec, line) for line in lines}

@@ -1,6 +1,6 @@
 """"안 들려요", "누구세요?"처럼 답이 정해진 짧은 말에 고정 답을 고르는 표.
 
-서버가 직접 음성을 처리하던 대본 모드의 코드다. 지금 통화에는 쓰이지 않고, backend/tests가 검사하고 있어 남겨 두었다.
+예전 대본 모드 코드. 현재 통화에서는 안 쓰고 backend/tests 때문에 남겨 둠.
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ __all__ = [
     "match_trigger",
 ]
 
-# 긴 말 안의 같은 단어는 다른 뜻이라 짧은 말만 본다.
+# 긴 문장 속 같은 단어는 의도가 달라서 짧은 발화만 매칭
 MAX_REFLEX_CHARS = 40
 
-# 먼저 맞는 것이 이긴다. 구체적인 것을 앞에 둔다.
+# 앞에서부터 먼저 맞는 것을 쓴다. 구체적인 패턴을 앞에.
 REFLEX_TRIGGERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "scam_accusation",
@@ -54,7 +54,7 @@ def match_trigger(text: str) -> str | None:
 
 
 class ReflexTable:
-    """통화 한 건의 고정 답 사용 기록. budget은 한 통화에서 고정 답으로 넘길 수 있는 횟수."""
+    """통화별 고정 답 사용 기록. budget: 통화당 고정 답 최대 횟수."""
 
     def __init__(
         self,
@@ -75,7 +75,7 @@ class ReflexTable:
         return max(0, self._budget - len(self._used))
 
     def take(self, text: str) -> str | None:
-        """고정 답을 쓰고 돌려준다. None이면 모델이 답한다."""
+        """고정 답을 꺼내 쓴다. None이면 모델이 답할 차례."""
         if self.remaining <= 0:
             return None
         trigger = match_trigger(text)

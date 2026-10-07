@@ -1,6 +1,6 @@
-"""시나리오(Playbook) 정의와 지시문 조립.
+"""Playbook 정의와 지시문 조립.
 
-Playbook은 대본이 아니라 지침이다. 대사는 통화 중 모델이 쓰고, 여기서는 사건, 목표, 압박 방향을 고정한다.
+Playbook은 대본이 아니다. 대사는 모델이 쓰고, 여기서는 사건·목표·압박 방향만 고정한다.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from ai.scenarios.types import Scenario
 __all__ = ["Playbook", "ScriptReply", "build_scenario_block", "build_system_prompt"]
 
 
-# TTS가 문장부호에서 끊어 읽으므로 모든 문장을 부호로 끝내게 한다.
+# 시나리오 공통 말투 규칙. TTS가 문장부호로 문장을 나누므로 끝 부호는 필수.
 _STYLE_RULES = """
 [말하는 방식]
 - 글이 아니라 말이다. 안내문이나 공지를 읽는 투로 말하지 않는다.
@@ -32,7 +32,7 @@ _STYLE_RULES = """
 
 @dataclass(frozen=True)
 class Playbook:
-    """시나리오 한 편. 사람이 쓰고 통화 중에 바꾸지 않는다."""
+    """시나리오 한 편."""
 
     id: str
     name: str
@@ -50,28 +50,28 @@ class Playbook:
     red_flags: tuple[str, ...]
     ideal_trainee_response: str
     max_turns: int
-    # (상대 말, 내 답) 예시. 말의 길이와 말투는 지시보다 예시가 잘 가르친다.
+    # (상대 말, 내 답) 퓨샷. 길이·말투는 지시문보다 예시로 잡는 게 잘 먹힌다.
     examples: tuple[tuple[str, str], ...] = ()
-    # 통화 지시문에는 들어가지 않는다. 녹취 화자 판정에만 쓴다(ai/transcript.py).
+    # CallContext에는 안 들어간다. 녹취 화자 판정용(ai/transcript.py).
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
-    # 거절했을 때 한 번 하는 포기 경고
+    # 거절 시 한 번 하는 포기 경고
     giveup_line: str = ""
-    # 마지막 요구를 승낙받으면 하는 넘김 말
+    # 마지막 요구를 승낙받았을 때의 넘김 말
     handoff_line: str = ""
     tts_voice_id: str | None = None
-    # progression은 [단계별 대사 예시]로, script는 의도별 첫 줄만 [상대 반응별 받아치기 예시]로 들어간다.
+    # progression → [단계별 대사 예시], script 첫 줄 → [상대 반응별 받아치기 예시]
     progression: tuple[str, ...] = ()
     script: tuple[ScriptReply, ...] = ()
 
 
 def build_system_prompt(playbook: Playbook) -> str:
-    """공통 안전·말투 규칙과 시나리오 블록을 합친 전체 지시문."""
+    """안전·말투 규칙 + 시나리오 블록."""
     return "\n\n".join([SAFETY_RULES, _STYLE_RULES, build_scenario_block(playbook)]).strip()
 
 
 def build_scenario_block(playbook: Playbook) -> str:
-    """공통 규칙을 뺀 시나리오 부분. 통화마다 CallContext로 보낸다."""
+    """공통 규칙을 뺀 시나리오 부분(CallContext 본문)."""
     plan = "\n".join(
         f"{index}. {step}" for index, step in enumerate(playbook.turn_plan, 1)
     )
@@ -103,7 +103,7 @@ def build_scenario_block(playbook: Playbook) -> str:
 
 
 def to_scenario(playbook: Playbook) -> Scenario:
-    """Playbook을 백엔드가 쓰는 Scenario로 바꾼다."""
+    """백엔드용 Scenario로 변환."""
     return Scenario(
         id=playbook.id,
         name=playbook.name,

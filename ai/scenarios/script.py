@@ -1,6 +1,6 @@
-"""훈련자 의도에 맞는 미리 쓴 대사를 고른다. ScriptReply는 Playbook.script의 타입으로 계속 쓴다.
+"""훈련자 의도에 맞는 미리 쓴 대사를 고른다. ScriptReply는 Playbook.script 타입이라 계속 쓴다.
 
-서버가 직접 음성을 처리하던 대본 모드의 코드다. 지금 통화에는 쓰이지 않고, backend/tests가 검사하고 있어 남겨 두었다.
+예전 대본 모드 코드. 현재 통화에서는 안 쓰고 backend/tests 때문에 남겨 둠.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class ScriptReply:
 
 @dataclass(frozen=True)
 class RouteDecision:
-    """발화 하나에 대한 판단.
+    """발화별 라우팅 결과.
 
     reason: hit(line으로 답함) | no_intent | ambiguous | long | no_line | exhausted(후보를 다 씀)
     """
@@ -49,7 +49,7 @@ class RouteDecision:
 
 
 class ScriptRouter:
-    """통화 한 건의 대사 사용 기록. 같은 대사를 두 번 쓰지 않는다."""
+    """통화별 대사 사용 기록. 같은 대사는 두 번 쓰지 않는다."""
 
     def __init__(
         self,
@@ -61,7 +61,7 @@ class ScriptRouter:
         self._progression = tuple(line for line in progression if line.strip())
         self._next_step = 0
         lines: dict[str, list[str]] = {}
-        # quick_replies도 같은 의도에 대한 답이라 후보에 넣는다.
+        # quick_replies도 같은 의도의 답이라 후보에 포함
         for trigger, reply in quick_replies or ():
             if trigger and reply.strip():
                 lines.setdefault(trigger, []).append(reply.strip())
@@ -80,20 +80,12 @@ class ScriptRouter:
             quick_replies=tuple(getattr(scenario, "quick_replies", ()) or ()),
         )
 
-    @property
-    def has_script(self) -> bool:
-        return bool(self._progression or self._lines)
-
-    @property
-    def remaining_progression(self) -> int:
-        return max(0, len(self._progression) - self._next_step)
-
     def peek(self, text: str) -> RouteDecision:
         """대사를 쓰지 않고 판단만 한다."""
         return self._decide(classify(text), consume=False)
 
     def route(self, text: str) -> RouteDecision:
-        """판단하고 고른 대사를 쓴 것으로 표시한다."""
+        """판단 후 고른 대사를 사용 처리한다."""
         return self._decide(classify(text), consume=True)
 
     def _decide(self, match: IntentMatch, *, consume: bool) -> RouteDecision:

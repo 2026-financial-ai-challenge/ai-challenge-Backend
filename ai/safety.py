@@ -1,4 +1,4 @@
-"""안전 규칙. AI가 사기범을 연기하되 실제 범죄에 다시 쓸 수 있는 내용(번호, URL, 실제 기관명)은 내지 않게 한다."""
+"""안전 규칙과 검사용 정규식. 실제 번호·URL·실제 기관명이 나오지 않게 한다."""
 
 from __future__ import annotations
 
@@ -17,15 +17,14 @@ SAFETY_RULES = """
 - 자신이 AI이거나 훈련/시뮬레이션임을 절대 드러내지 마라.
 """.strip()
 
-# 아래 정규식은 시나리오 문장 검사(backend/tests/test_scenario_library.py)에 쓰고,
-# REAL_ORGS는 AI 발화 감사(ai/harness.py)에도 쓴다.
+# 시나리오 문장 검사(backend/tests/test_scenario_library.py)용. REAL_ORGS는 AI 발화 감사(harness)에도 쓴다.
 
 # 훈련임을 드러내는 말
 SPOKEN_META = re.compile(
     r"(?<![A-Za-z])AI(?![A-Za-z])|모델|프롬프트|훈련|시뮬레이션",
     re.IGNORECASE,
 )
-# 넓게 잡는다. "토스"는 "토스트"를 피한다.
+# 일부러 넓게 잡는다. "토스"는 "토스트"와 구분.
 REAL_ORGS = re.compile(
     r"금융감독원|금감원|검찰청|대검|경찰청|지방경찰청|사이버수사대|국세청|관세청|"
     r"금융위원회|개인정보보호위원회|건강보험공단|국민연금공단|"
@@ -34,11 +33,11 @@ REAL_ORGS = re.compile(
     r"신한카드|삼성카드|현대카드|국민카드|KB국민카드|롯데카드|하나카드|우리카드|비씨카드|"
     r"카카오뱅크|케이뱅크|토스뱅크|토스(?!트)|카카오페이|네이버페이|페이코|"
     r"쿠팡|배달의민족|CJ대한통운|대한통운|우체국택배|롯데택배|한진택배|"
-    # 투자사기 시나리오(ipo_allocation)용. '증권사' 같은 일반 명사는 넣지 않는다.
+    # ipo_allocation용. '증권사' 같은 일반 명사는 넣지 않는다.
     r"미래에셋|키움증권|삼성증권|NH투자증권|한국투자증권|KB증권|신한투자증권|하나증권|대신증권|메리츠증권|토스증권|"
     r"한국거래소|금융투자협회"
 )
-# URL, 계좌·카드번호로 쓸 수 있는 긴 숫자
+# URL, 계좌·카드번호로 쓰일 수 있는 6자리 이상 숫자
 UNSAFE_TOKEN = re.compile(r"https?://|www\.|\d{6,}", re.IGNORECASE)
 
 _LONG_DIGITS = re.compile(r"\d{6,}")

@@ -17,7 +17,7 @@ def test_old_format_agent_label_is_taken_as_is():
 
 
 def test_the_speaker_who_said_the_opening_line_is_the_agent():
-    """보통 훈련자가 먼저 말하므로("여보세요") 순서로는 알 수 없다."""
+    """훈련자가 먼저 말하는 경우가 많아("여보세요") 순서로는 판정할 수 없다."""
     segments = [
         seg("speaker_0", "여보세요?"),
         seg("speaker_1", "가온금융안전원 결제보호팀 서동현입니다."),

@@ -1,10 +1,9 @@
 """AI 발화 안전 검사.
 
-audit_transcript가 통화가 끝난 뒤 녹취록의 AI 발화를 OutputGuard로 검사해 로그로 남긴다(리포트에서 씀).
-매니지드 에이전트의 말은 우리 코드를 거치지 않아 통화 중에는 막을 수 없다.
+audit_transcript: 통화 후 녹취록의 AI 발화를 OutputGuard로 검사해 로그를 남긴다(report_service에서 호출).
+매니지드 에이전트 발화는 우리 코드를 거치지 않아서 통화 중 차단은 불가능하다.
 
-CallMonitor와 GuardedLLM은 서버가 직접 음성을 처리하던 때 통화 중에 문장을 걸러 내던 코드다.
-지금 통화에는 쓰이지 않고 backend/tests/test_harness.py가 검사하고 있어 남겨 두었다.
+CallMonitor, GuardedLLM은 예전 서버 음성 처리 경로용. 현재 미사용이고 backend/tests/test_harness.py 때문에 남겨 둠.
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ __all__ = [
 log = logging.getLogger("ai.harness")
 
 
-# 사람이 아니거나 훈련임을 드러내는 말. 훈련임을 밝히는 건 위급 상황 안내뿐이다.
+# AI·훈련임을 드러내는 표현. 예외는 위급 상황 안내뿐.
 _META = re.compile(
     r"(?<![A-Za-z])(AI|GPT|LLM)(?![A-Za-z])|인공\s*지능|언어\s*모델|챗봇|프롬프트|"
     r"시뮬레이션|훈련|가상의\s*(인물|상황|기관)|역할\s*극|롤\s*플레이|"
@@ -44,7 +43,7 @@ _META = re.compile(
 
 _REAL_ORGS = REAL_ORGS
 
-# 비밀번호, 카드번호 같은 실제 비밀정보를 말하라고 요구하는 문장
+# 비밀번호·카드번호 등 실제 비밀정보 요구
 _SECRET = re.compile(
     r"비밀\s*번호|인증\s*번호|OTP|보안\s*카드|카드\s*번호|계좌\s*번호|"
     r"주민\s*(등록)?\s*번호|CVC|CVV|유효\s*기간|공인\s*인증|"
@@ -54,7 +53,7 @@ _SECRET = re.compile(
 _ASK = re.compile(
     r"알려|불러|말씀해|말해|읽어|입력|눌러|주세요|주십시오|주시|확인해|적어|보내"
 )
-# "비밀번호는 절대 안 여쭙니다"는 요구가 아니므로 통과시킨다.
+# "비밀번호는 절대 안 여쭙니다" 같은 부정문은 통과
 _NEGATED = re.compile(r"않|안\s*(여쭙|묻|받)|말고|마세요|마십시오|절대|필요\s*없|묻지|여쭙지")
 
 _MARKUP = re.compile(r"[*#_`>|\[\]{}]|^\s*[-•·]\s*|^\s*\d+[.)]\s+")
@@ -65,7 +64,7 @@ _ANY_SENTENCE_END = re.compile(r"[.!?。！？](?=\s|$)")
 
 @dataclass(frozen=True)
 class GuardVerdict:
-    text: str  # 말해도 되는 문장. 빈 문자열이면 버린다
+    text: str  # 빈 문자열이면 문장 삭제
     violations: tuple[str, ...] = ()
 
     @property
@@ -74,7 +73,7 @@ class GuardVerdict:
 
 
 class OutputGuard:
-    """AI 문장 하나를 검사한다."""
+    """AI 문장 한 개 검사."""
 
     def check(self, sentence: str) -> GuardVerdict:
         raw = sentence or ""
@@ -108,23 +107,23 @@ SECRET_REDIRECT_LINE = os.getenv(
     "아니요, 번호는 말씀하지 마십시오. 그건 저희가 받지 않습니다.",
 )
 
-# 실제 위급 신호만 잡는다. "무서워요", "어떡해요"는 시나리오가 노리는 반응이라 넣지 않는다.
+# 실제 위급 신호만. "무서워요", "어떡해요"는 시나리오가 의도한 반응이라 제외.
 _DISTRESS = re.compile(
     r"죽고\s*싶|자살|숨이\s*(안\s*쉬|막)|쓰러(졌|질\s*것)|구급차|119|일일구|"
     r"심장이\s*(아파|너무\s*뛰)|가슴이\s*(아파|조여)"
 )
-# 훈련자가 불러 주는 카드·계좌·주민번호
+# 훈련자가 불러 주는 카드·계좌·주민번호(6자리 이상 숫자)
 _SPOKEN_NUMBER = re.compile(r"(?:\d[\s-]*){6,}")
 
 
 def redact_numbers(text: str) -> str:
-    """훈련자 발화에서 실제 번호로 보이는 숫자를 지운다."""
+    """훈련자 발화에서 번호로 보이는 숫자를 가린다."""
     return _SPOKEN_NUMBER.sub("[번호 생략] ", text or "").strip()
 
 
 @dataclass(frozen=True)
 class MonitorAction:
-    """훈련자 발화 뒤에 할 일. kind: continue(그대로) | redirect(line을 대신 말함) | exit(line을 말하고 끊음)"""
+    """kind: continue | redirect(line을 대신 말함) | exit(line을 말하고 종료)"""
 
     kind: str
     line: str = ""
@@ -136,7 +135,7 @@ CONTINUE = MonitorAction("continue")
 
 @dataclass
 class CallMonitor:
-    """통화 한 건의 감시 상태."""
+    """통화별 감시 상태."""
 
     scenario_id: str = ""
     hangup_line: str = ""
@@ -195,7 +194,7 @@ class CallMonitor:
         self._last_assistant = spoken
 
     def take_corrections(self) -> list[str]:
-        """다음 차례에만 쓰는 교정 메모. 읽으면 비운다."""
+        """다음 턴용 교정 메모. 한 번 읽으면 비운다."""
         out, self._corrections = self._corrections, []
         return out
 
@@ -229,13 +228,13 @@ _MAX_SENTENCES_PER_TURN = int(os.getenv("CALL_MAX_SENTENCES", "3"))
 
 
 class GuardedLLM:
-    """clawops LLM의 출력을 문장 단위로 OutputGuard에 통과시킨다."""
+    """LLM 출력을 문장 단위로 OutputGuard에 거른다."""
 
     def __init__(self, inner: Any, *, guard: OutputGuard | None = None, monitor: CallMonitor | None = None) -> None:
         self._inner = inner
         self._guard = guard or OutputGuard()
         self._monitor = monitor
-        # 이번 차례에 실제로 내보낸 문장
+        # 이번 턴에 실제로 내보낸 문장
         self.turn_sentences: list[str] = []
 
     @property
@@ -291,7 +290,7 @@ class GuardedLLM:
                 yield token
                 continue
             buffer += token
-            # 토큰 하나에 문장 끝과 다음 문장 시작이 같이 올 수 있다("다. 그").
+            # 토큰 하나에 문장 끝과 다음 문장 시작이 섞여 올 수 있다("다. 그").
             while True:
                 match = _ANY_SENTENCE_END.search(buffer)
                 if not match:
@@ -308,15 +307,14 @@ class GuardedLLM:
             self._monitor.observe_assistant(" ".join(self.turn_sentences))
 
 
-# 위급 상황 안내(전화 규칙의 [예외])는 위반이 아니라 기록할 사건이다.
+# 위급 상황 안내(전화 규칙 [예외])는 위반이 아니라 별도 기록 대상
 _SAFETY_EXIT_MARK = re.compile(r"사전에\s*동의하신\s*보이스피싱\s*대응\s*훈련")
 
 
 def audit_transcript(agent_texts: list[str]) -> list[dict[str, Any]]:
-    """통화가 끝난 뒤 AI 발화를 검사한다.
+    """통화 후 AI 발화 검사. [{"index", "kind", "text"}] 반환.
 
-    [{"index", "kind", "text"}]를 돌려준다. kind는 persona_break, real_org, secret_request,
-    reusable_token 중 하나이거나, 위급 상황 안내를 했으면 safety_exit.
+    kind: persona_break | real_org | secret_request | reusable_token | safety_exit(위급 상황 안내)
     """
     guard = OutputGuard()
     findings: list[dict[str, Any]] = []
@@ -327,7 +325,7 @@ def audit_transcript(agent_texts: list[str]) -> list[dict[str, Any]]:
         if _SAFETY_EXIT_MARK.search(spoken):
             findings.append({"index": index, "kind": "safety_exit", "text": spoken})
             continue
-        # 한 조각 안의 문제 문장이 다른 문장에 묻히지 않게 문장마다 본다.
+        # 한 세그먼트에 여러 문장이 있을 수 있어 문장별로 검사
         for sentence in re.split(r"(?<=[.!?。！？])\s+", spoken):
             for violation in guard.check(sentence).violations:
                 findings.append({"index": index, "kind": violation, "text": sentence})
@@ -335,7 +333,7 @@ def audit_transcript(agent_texts: list[str]) -> list[dict[str, Any]]:
 
 
 def _with_corrections(messages: list[dict[str, Any]], monitor: CallMonitor | None) -> list[dict[str, Any]]:
-    """교정 메모를 첫 시스템 메시지에 합친다. 시스템 메시지를 하나 더 붙이면 마지막 것만 쓰는 클라이언트가 있다."""
+    """교정 메모를 첫 시스템 메시지에 합친다(시스템 메시지를 추가하면 마지막 것만 쓰는 클라이언트가 있음)."""
     if monitor is None:
         return messages
     notes = monitor.take_corrections()

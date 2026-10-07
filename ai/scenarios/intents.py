@@ -1,6 +1,6 @@
 """훈련자 발화 하나의 의도를 정규식으로 분류한다.
 
-서버가 직접 음성을 처리하던 대본 모드의 코드다. 지금 통화에는 쓰이지 않고, backend/tests가 검사하고 있어 남겨 두었다.
+예전 대본 모드 코드. 현재 통화에서는 안 쓰고 backend/tests 때문에 남겨 둠.
 """
 
 from __future__ import annotations
@@ -19,17 +19,17 @@ __all__ = [
     "classify",
 ]
 
-# 긴 말에는 의도가 여럿이라 분류하지 않는다.
+# 긴 발화는 의도가 섞여 있어 분류하지 않는다.
 MAX_ROUTABLE_CHARS = 30
 
 ACK = "ack"
 
 _REFLEX = dict(REFLEX_TRIGGERS)
 
-# 우선순위 순. 둘 이상 맞으면 앞의 것을 의도로 하고 ambiguous로 표시한다.
+# 우선순위 순. 여러 개가 맞으면 앞의 것을 쓰고 ambiguous 처리.
 INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
-        # "좀 이상한데", "못 믿겠어요" 같은 의심도 같은 답을 받는다.
+        # "좀 이상한데", "못 믿겠어요" 같은 의심도 같은 답으로 처리
         "scam_accusation",
         re.compile(
             _REFLEX["scam_accusation"].pattern
@@ -43,7 +43,7 @@ INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
-        # 통화 중 "여보세요"는 인사가 아니라 회선 확인이다.
+        # 통화 중 "여보세요"는 인사가 아니라 회선 확인
         "not_audible",
         re.compile(_REFLEX["not_audible"].pattern + r"|^\s*여보세요\s*[?.!]?\s*$"),
     ),
@@ -107,13 +107,13 @@ INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         ACK,
-        # "예전에", "어디세요"를 맞장구로 잡지 않게 낱말 단위로만 본다.
+        # "예전에", "어디세요" 오탐 방지로 단어 단위만 매칭
         re.compile(
             r"^\s*(?:(?:네|예|응|음|어)+(?![가-힣])|그래(?:요)?|그렇(?:죠|네요|습니다)|"
             r"맞(?:아요|습니다|아)|알겠(?:어요|습니다|어)|그럴게(?:요)?|좋아요|괜찮아요|"
             r"그런데(?:요)?(?![가-힣])|말씀하세요|제\s*이름은|"
             r"저는\s*[가-힣]{2,4}(?:이에요|예요|입니다))|"
-            # 놀라며 듣는 말: "아 진짜요?", "정말요?"
+            # 놀라면서 듣는 반응: "아 진짜요?", "정말요?"
             r"^\s*(?:아\s*)?(?:진짜|정말)(?:요)?\s*[?!.]*\s*$"
         ),
     ),
@@ -124,7 +124,7 @@ INTENTS: tuple[str, ...] = tuple(name for name, _pattern in INTENT_PATTERNS)
 
 @dataclass(frozen=True)
 class IntentMatch:
-    """발화 하나의 분류 결과. intent는 우선순위가 가장 높은 의도, matched는 맞은 의도 전부."""
+    """분류 결과. intent: 최우선 의도, matched: 매칭된 의도 전체."""
 
     text: str
     intent: str | None
@@ -132,7 +132,7 @@ class IntentMatch:
 
     @property
     def ambiguous(self) -> bool:
-        # 문장 앞의 "네", "아니"는 따로 세지 않는다.
+        # 문장 앞의 "네", "아니"는 별도 의도로 세지 않는다.
         substantive = [name for name in self.matched if name != ACK]
         return len(set(substantive)) > 1
 

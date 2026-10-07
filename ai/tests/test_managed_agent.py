@@ -13,9 +13,9 @@ def test_base_instructions_carry_safety_style_and_phone_rules():
     assert "[교육용 시뮬레이션 안전 규칙" in text
     assert "[말하는 방식]" in text
     assert "[전화 규칙]" in text
-    # 위급 상황 안내는 다른 규칙보다 앞서야 한다
+    # 위급 상황 안내가 다른 규칙보다 우선
     assert "모든 규칙보다 우선한다" in text
-    # 동의하지 않은 사람이 받으면 연기를 멈추고, 번호를 달라고 해도 지어내지 않는다
+    # 다른 사람이 받으면 중단, 번호를 지어내지 않음
     assert "잘못 걸었습니다" in text
     assert "절대 지어내지 않는다" in text
 
@@ -25,7 +25,7 @@ def test_refusal_rule_has_one_answer():
     assert "포기 경고" in text
     # 상대가 영어로 말해도 한국어로 답한다
     assert "한국어로만 말한다" in text
-    # 거절에 다른 대응을 시키는 문장이 함께 있으면 모델이 아무거나 따른다
+    # 거절 대응 규칙이 두 개면 모델이 아무거나 따른다
     assert "[받아치기]의 거절 대응" not in text
     assert "상대가 거절하든" not in text
     for playbook in PLAYBOOKS:
@@ -50,10 +50,9 @@ def test_call_context_fits_and_carries_the_scenario(scenario_id):
     assert len(instruction) <= ma.CALL_CONTEXT_LIMIT
     assert instruction.startswith("[첫 마디]\n" + scenario.opening_line)
     assert scenario.hangup_line in instruction
-    # 포기 경고는 인물마다 다르다. 비면 공통 규칙이 가리킬 문장이 없다.
+    # 공통 규칙이 아래 블록을 참조하므로 비어 있으면 안 된다
     playbook = ma._playbook_for(scenario)
     assert playbook.giveup_line and f"[거절할 때 경고]\n{playbook.giveup_line}" in instruction
-    # 넘김 말이 없으면 승낙 뒤 즉흥 질문을 이어 간다
     assert playbook.handoff_line and f"[승낙받으면 넘김]\n{playbook.handoff_line}" in instruction
     for line in (playbook.hangup_line, playbook.giveup_line, playbook.handoff_line):
         assert not SPOKEN_META.search(line), line

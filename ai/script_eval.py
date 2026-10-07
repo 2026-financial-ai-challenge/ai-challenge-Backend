@@ -1,6 +1,6 @@
 """대본 모드가 답할 수 있는 훈련자 발화 비율(coverage)과 정확도(precision)를 잰다.
 
-서버가 직접 음성을 처리하던 대본 모드의 코드다. 지금 통화에는 쓰이지 않고, backend/tests가 검사하고 있어 남겨 두었다.
+예전 대본 모드 코드. 현재 통화에서는 안 쓰고 backend/tests 때문에 남겨 둠.
 """
 
 from __future__ import annotations

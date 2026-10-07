@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Scenario:
-    """백엔드가 쓰는 시나리오. Playbook에서 to_scenario()로 만든다."""
+    """백엔드용 시나리오. Playbook에서 to_scenario()로 만든다."""
 
     id: str
     name: str
@@ -18,7 +18,7 @@ class Scenario:
     tactics: tuple[str, ...] = ()
     red_flags: tuple[str, ...] = ()
     ideal_trainee_response: str | None = None
-    # 통화 지시문에는 들어가지 않는다. 녹취 화자 판정에만 쓴다(ai/transcript.py).
+    # 녹취 화자 판정용(ai/transcript.py)
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
     progression: tuple[str, ...] = ()

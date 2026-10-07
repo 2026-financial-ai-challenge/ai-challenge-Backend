@@ -226,7 +226,6 @@ def test_existing_member_records_consent_on_first_training(client, monkeypatch):
 
 
 def test_resend_is_blocked_until_the_cooldown_lapses(client):
-    """The cooldown is the key's own TTL, not a timestamp we compare against."""
     http, sent = client
     first = http.post("/v1/auth/signup/otp", json={"phoneNumber": PHONE})
     assert first.status_code == 200
@@ -234,7 +233,6 @@ def test_resend_is_blocked_until_the_cooldown_lapses(client):
     second = http.post("/v1/auth/signup/otp", json={"phoneNumber": PHONE})
     assert second.status_code == 429
     assert second.json()["code"] == "OTP_COOLDOWN"
-    # The blocked request must not have sent a second code.
     assert len(sent) == 1
 
 
@@ -257,7 +255,6 @@ def test_wrong_codes_lock_the_challenge(client):
     assert locked.status_code == 429
     assert locked.json()["code"] == "OTP_LOCKED"
 
-    # Locked means locked: the real code does not rescue the challenge.
     with_real_code = http.post(
         "/v1/auth/signup/verify", json={"phoneNumber": PHONE, "code": real_code}
     )
@@ -266,7 +263,6 @@ def test_wrong_codes_lock_the_challenge(client):
 
 
 def test_a_solved_challenge_cannot_be_verified_twice(client):
-    """Issuing the token retires the challenge, so the code stops working."""
     http, sent = client
     _verify(http, sent)
 

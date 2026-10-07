@@ -1,8 +1,4 @@
-"""후처리 행동 분류 라벨 목록.
-
-라벨 분류(LLM 호출)와 점수 계산은 백엔드 report_service가 맡고,
-이 모듈은 백엔드가 import하는 라벨 목록만 둔다.
-"""
+"""리포트 채점(backend/app/services/report_service.py)이 쓰는 행동 라벨."""
 
 RISK_LABELS = (
     "개인정보 제공",

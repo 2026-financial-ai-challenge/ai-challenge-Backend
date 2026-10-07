@@ -1,5 +1,3 @@
-"""Runtime harness (ai/harness.py): what the caller may say, and when to stop."""
-
 import asyncio
 
 import pytest
@@ -34,8 +32,6 @@ def test_guard_drops_what_the_prompt_forbids(sentence, violation):
 
 
 def test_guard_keeps_the_scammer_line_that_names_a_secret_without_asking():
-    """ "저희는 비밀번호는 절대 안 여쭙니다" is the most trust-building thing a
-    real crew says. Dropping it would make every caller weaker than a real one."""
     for line in (
         "의심하시는 게 맞습니다. 그래서 저희는 카드 번호나 비밀번호는 절대 안 여쭙습니다.",
         "계좌번호나 비밀번호는 여쭙지 않습니다. 성함 하나만 확인하면 됩니다.",
@@ -98,8 +94,6 @@ def test_guarded_llm_caps_sentences_per_turn():
 
 
 def test_monitor_corrections_are_merged_into_the_one_system_message():
-    """Some clients keep only the last system message (AnthropicLLM does), so
-    a second system message would silently drop the whole scenario prompt."""
     inner = _Tokens(["네."])
     monitor = CallMonitor()
     monitor.observe_violation(("secret_request",), "비밀번호 알려 주세요.")
@@ -108,7 +102,6 @@ def test_monitor_corrections_are_merged_into_the_one_system_message():
     assert len(systems) == 1
     assert systems[0]["content"].startswith("SYS")
     assert "[감독 지시" in systems[0]["content"]
-    # consumed once
     assert monitor.take_corrections() == []
 
 

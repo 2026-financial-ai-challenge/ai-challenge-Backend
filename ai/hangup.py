@@ -1,11 +1,7 @@
-"""Detecting that the trainee wants to end the call.
+"""훈련자가 통화를 끝내겠다고 말했는지 판정한다.
 
-This drives two things that must agree: the caller's behaviour (hold on to
-the first attempt, hang up on the second) and the report's scoring, where
-"전화 종료(빠른 판단)" is one of the highest-weighted defensive behaviours.
-The pattern used to be copy-pasted into both call sites, so widening one and
-not the other would have silently changed the score without changing the
-conversation. One definition, imported by both.
+리포트 채점(backend/app/services/report_service.py)의 "전화 종료(빠른 판단)"에 쓴다.
+녹취록의 말만 보므로 아무 말 없이 버튼으로 끊은 통화는 잡지 못한다.
 """
 
 from __future__ import annotations
@@ -14,13 +10,8 @@ import re
 
 __all__ = ["HANG_UP", "HANG_UP_TAIL_CHARS", "wants_hang_up"]
 
-# Deliberately conservative: every alternative below is terminal on a phone
-# call. Refusals ("안 할래요", "됐어요") are NOT included -- they mean "no" to
-# the request, not "I am ending this call", and the scenarios rely on that
-# distinction to keep pushing.
-#
-# "이만" only counts when followed by a closing verb: on its own it is the
-# number 20,000 ("이만 삼천 원").
+# 통화를 끝내는 말만 넣는다. "안 할래요", "됐어요"는 요구를 거절한 것이지 끊겠다는 말이 아니다.
+# "이만"은 "이만 삼천 원"처럼 숫자일 수 있어 뒤에 끝맺는 말이 올 때만 센다.
 HANG_UP = re.compile(
     r"끊겠|끊을게|끊습니다|끊는다|전화\s*끊|"
     r"끝낼|끝내겠|끝내죠|끝냅니다|"
@@ -33,16 +24,8 @@ HANG_UP = re.compile(
 )
 
 
-# Announcing the end of a call is the last thing someone says. The same words
-# earlier in a long answer are almost always reported speech -- "그 사람이 전화
-# 끊으라고 하던데요" -- and the trainee carries straight on talking past them.
-# Requiring the match to land in the tail costs nothing on a short utterance:
-# anything shorter than this window is all tail, so every one-line closing
-# behaves exactly as it did before.
-#
-# This matters more than it used to. PhonePipelineSession now merges a turn
-# that Deepgram split across several finals back into one utterance, so the
-# text this sees is a whole answer rather than a fragment of one.
+# 끊겠다는 말은 발화 끝에 온다. 긴 발화 중간의 같은 말("그 사람이 전화 끊으라고 하던데요")은
+# 남의 말을 옮긴 경우가 많아, 마지막 30자 안에 있을 때만 센다.
 HANG_UP_TAIL_CHARS = 30
 
 

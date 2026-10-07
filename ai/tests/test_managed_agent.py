@@ -3,7 +3,7 @@ import json
 import pytest
 
 from ai import managed_agent as ma
-from ai.safety import REAL_ORGS, UNSAFE_TOKEN
+from ai.safety import REAL_ORGS, SPOKEN_META, UNSAFE_TOKEN
 from ai.scenarios import SCENARIOS, get_scenario
 from ai.scenarios.library import PLAYBOOKS
 
@@ -13,8 +13,7 @@ def test_base_instructions_carry_safety_style_and_phone_rules():
     assert "[교육용 시뮬레이션 안전 규칙" in text
     assert "[말하는 방식]" in text
     assert "[전화 규칙]" in text
-    # the emergency exit is the only place the exercise may be named, and it
-    # has to say it outranks the no-disclosure rule
+    # 훈련이라고 밝혀도 되는 건 위급 안내뿐이고, 그 규칙이 다른 규칙보다 앞서야 한다
     assert "모든 규칙보다 우선한다" in text
     # 동의하지 않은 사람이 받으면 연기를 멈추고, 번호를 달라고 해도 지어내지 않는다
     assert "잘못 걸었습니다" in text
@@ -24,9 +23,9 @@ def test_base_instructions_carry_safety_style_and_phone_rules():
 def test_refusal_rule_has_one_answer():
     text = ma.base_instructions()
     assert "포기 경고" in text
-    # 상대가 영어로 답하자 영어로 바꿔 말했다(10-05 웹 통화 CA3da621aca04d5e9afadd253df6317b5d)
+    # 상대가 영어로 답하면 따라서 영어로 바꿔 말하던 문제
     assert "한국어로만 말한다" in text
-    # 거절에 다른 대응을 시키는 옛 문장이 남으면 모델이 둘 중 아무거나 따른다(10-05 검수)
+    # 거절에 다른 대응을 시키는 옛 문장이 남으면 모델이 둘 중 아무거나 따른다
     assert "[받아치기]의 거절 대응" not in text
     assert "상대가 거절하든" not in text
     for playbook in PLAYBOOKS:
@@ -51,7 +50,14 @@ def test_call_context_fits_and_carries_the_scenario(scenario_id):
     assert len(instruction) <= ma.CALL_CONTEXT_LIMIT
     assert instruction.startswith("[첫 마디]\n" + scenario.opening_line)
     assert scenario.hangup_line in instruction
-    assert f"최대 {scenario.max_turns}번" in instruction
+    # 포기 경고는 인물마다 다르다. 비면 공통 규칙이 가리킬 문장이 없다.
+    playbook = ma._playbook_for(scenario)
+    assert playbook.giveup_line and f"[거절할 때 경고]\n{playbook.giveup_line}" in instruction
+    # 승낙 뒤 갈 단계가 없으면 즉흥 질문을 이어 간다
+    assert playbook.handoff_line and f"[승낙받으면 넘김]\n{playbook.handoff_line}" in instruction
+    for line in (playbook.hangup_line, playbook.giveup_line, playbook.handoff_line):
+        assert not SPOKEN_META.search(line), line
+    assert f"최대 {playbook.max_turns}번" in instruction
     assert "[사건" in instruction and "[받아치기]" in instruction
     assert ctx["variables"]["scenario_id"] == scenario_id
     assert not REAL_ORGS.search(instruction)
@@ -141,7 +147,7 @@ def test_resolve_agent_id_caches_and_explains_a_missing_agent():
     assert ma.resolve_agent_id("bank_security_hold", "live", rest=rest) == "a1"
     assert ma.resolve_agent_id("bank_security_hold", "live", rest=rest) == "a1"
     assert rest.list_calls == 1
-    # an unknown scenario id resolves through the fallback playbook
+    # 예전 id는 기본 시나리오의 에이전트로 간다
     assert ma.resolve_agent_id("voice_phishing_training", "live", rest=rest) == "a1"
     with pytest.raises(LookupError, match="sync"):
         ma.resolve_agent_id("investigation_unit", "external_tts", rest=rest)

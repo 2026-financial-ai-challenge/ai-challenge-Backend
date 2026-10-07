@@ -2,7 +2,6 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from secrets import randbelow
-from threading import Event, Lock, Thread
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -12,6 +11,7 @@ from app.database import SessionLocal
 from app.models.consent import Consent
 from app.models.scheduled_training import ScheduledTraining
 from app.models.training_session import TrainingSession
+from app.periodic import PeriodicWorker, env_int
 
 
 logger = logging.getLogger(__name__)
@@ -21,11 +21,6 @@ SCHEDULER_POLL_SEC = 30
 DEFAULT_RETRY_DELAY_SEC = 5 * 60
 DEFAULT_MAX_ATTEMPTS = 2
 DISPATCH_STALE_SEC = 10 * 60
-
-_scheduler_lock = Lock()
-_scheduler_stop = Event()
-_scheduler_thread: Thread | None = None
-
 
 def schedule_unannounced_training(
     source_session_id: str,
@@ -234,13 +229,10 @@ def _retry_or_fail(
 
 
 def _release_source_report(job: ScheduledTraining, *, now: datetime) -> None:
-    """Make the announced session's report final once its unannounced call gave up.
+    """불시 전화가 끝내 실패하면 1차 리포트를 최종으로 바꾼다.
 
-    The source report stays "draft" while the unannounced call is pending, and
-    the dashboard treats a non-final session as in progress, so a job that
-    failed for good used to leave the participant unable to start a new
-    training. A report still being built ("pending") is left alone: it reads
-    the job status when it finishes and goes straight to final.
+    draft로 남으면 대시보드가 훈련 진행 중으로 보고 새 훈련을 막는다.
+    아직 만들어지는 중(pending)인 리포트는 완성될 때 예약 상태를 보고 바로 final이 된다.
     """
     source = job.source_session
     if source is not None and source.report_status == "draft":
@@ -248,64 +240,24 @@ def _release_source_report(job: ScheduledTraining, *, now: datetime) -> None:
         source.updated_at = now
 
 
-def start_training_scheduler() -> None:
-    global _scheduler_thread
-    with _scheduler_lock:
-        if _scheduler_thread is not None and _scheduler_thread.is_alive():
-            return
-        _scheduler_stop.clear()
-        _scheduler_thread = Thread(
-            target=_scheduler_loop,
-            name="unannounced-training-scheduler",
-            daemon=True,
-        )
-        _scheduler_thread.start()
-
-
-def stop_training_scheduler() -> None:
-    _scheduler_stop.set()
-
-
-def _scheduler_loop() -> None:
-    while not _scheduler_stop.is_set():
-        try:
-            process_due_scheduled_trainings()
-        except Exception:
-            logger.exception("Scheduled training poll failed")
-        _scheduler_stop.wait(SCHEDULER_POLL_SEC)
-
-
 def _delay_range() -> tuple[int, int]:
-    minimum = int(
-        os.getenv("UNANNOUNCED_CALL_MIN_DELAY_SEC", str(DEFAULT_MIN_DELAY_SEC))
-    )
-    maximum = int(
-        os.getenv("UNANNOUNCED_CALL_MAX_DELAY_SEC", str(DEFAULT_MAX_DELAY_SEC))
-    )
-    if minimum < 0 or maximum < minimum:
+    minimum = env_int("UNANNOUNCED_CALL_MIN_DELAY_SEC", DEFAULT_MIN_DELAY_SEC)
+    maximum = env_int("UNANNOUNCED_CALL_MAX_DELAY_SEC", DEFAULT_MAX_DELAY_SEC)
+    if maximum < minimum:
         raise RuntimeError("Invalid unannounced call delay range")
     return minimum, maximum
 
 
 def _retry_delay_sec() -> int:
-    return max(
-        0,
-        int(
-            os.getenv(
-                "UNANNOUNCED_CALL_RETRY_DELAY_SEC",
-                str(DEFAULT_RETRY_DELAY_SEC),
-            )
-        ),
-    )
+    return env_int("UNANNOUNCED_CALL_RETRY_DELAY_SEC", DEFAULT_RETRY_DELAY_SEC)
 
 
 def _max_attempts() -> int:
-    return max(
-        1,
-        int(
-            os.getenv(
-                "UNANNOUNCED_CALL_MAX_ATTEMPTS",
-                str(DEFAULT_MAX_ATTEMPTS),
-            )
-        ),
-    )
+    return env_int("UNANNOUNCED_CALL_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, minimum=1)
+
+
+training_scheduler = PeriodicWorker(
+    "unannounced-training-scheduler",
+    process_due_scheduled_trainings,
+    lambda: SCHEDULER_POLL_SEC,
+)

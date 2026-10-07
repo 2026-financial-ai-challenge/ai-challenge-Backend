@@ -44,36 +44,36 @@ def _authenticated_session() -> tuple[str, dict[str, str]]:
     }
 
 
-# ---- scoring -------------------------------------------------------------
-
-
 def test_score_maps_events_to_phone_labels():
     report = score_web_events(
         ["link_opened", "identity_submitted", "financial_info_submitted"]
     )
-    # 60 - 15(개인정보) - 25(금융정보) = 20
-    assert report.score == 20
-    assert {b.label for b in report.riskBehaviors} == {"개인정보 제공", "금융정보 제공"}
+    # 60 - 15(링크 접근) - 15(개인정보) - 25(금융정보) = 5
+    assert report.score == 5
+    assert {b.label for b in report.riskBehaviors} == {
+        "링크 접근 의사",
+        "개인정보 제공",
+        "금융정보 제공",
+    }
     assert report.defenseBehaviors == []
 
 
 def test_defensive_events_raise_the_score():
     report = score_web_events(["link_opened", "report_clicked", "left_without_input"])
-    # 60 + 12(신고) + 15(빠른 판단) = 87
-    assert report.score == 87
+    # 60 - 15(링크 접근) + 12(신고) + 15(빠른 판단) = 72
+    assert report.score == 72
 
 
-def test_neutral_only_events_keep_base_score():
-    assert score_web_events(["link_opened"]).score == 60
+def test_opening_the_texted_link_costs_points():
+    report = score_web_events(["link_opened"])
+    assert report.score == 45
+    assert [b.label for b in report.riskBehaviors] == ["링크 접근 의사"]
 
 
 def test_duplicate_events_count_once():
     once = score_web_events(["identity_submitted"]).score
     twice = score_web_events(["identity_submitted", "identity_submitted"]).score
     assert once == twice == 45
-
-
-# ---- endpoints -----------------------------------------------------------
 
 
 def test_issue_link_requires_ownership():
@@ -102,6 +102,7 @@ def test_open_page_validates_token():
 def test_events_flow_into_the_report():
     client = _client()
     session_id, headers = _authenticated_session()
+    _call_report(session_id, score=60)
     token = create_link(session_id)
 
     for event in ("link_opened", "identity_submitted", "report_clicked"):
@@ -113,11 +114,11 @@ def test_events_flow_into_the_report():
     report = client.get(
         f"/v1/sessions/{session_id}/report", headers=headers
     ).json()
-    web = report["webTraining"]
-    assert web is not None
-    # 60 - 15(개인정보) + 12(신고) = 57
-    assert web["score"] == 57
-    assert "identity_submitted" in web["events"]
+    assert "webTraining" not in report
+    # 60 - 15(링크 접근) - 15(개인정보) + 12(신고) = 42
+    assert report["draft"]["score"] == 42
+    assert [b["label"] for b in report["draft"]["riskBehaviors"]] == ["링크 접근 의사", "개인정보 제공"]
+    assert [b["label"] for b in report["draft"]["defenseBehaviors"]] == ["신고 의사 표현"]
 
 
 def test_unknown_event_is_rejected():
@@ -128,9 +129,6 @@ def test_unknown_event_is_rejected():
         f"/v1/web-training/{token}/events", json={"eventType": "hack"}
     )
     assert bad.status_code == 400
-
-
-# ---- auto dispatch after a call -----------------------------------------
 
 
 def test_dispatch_sends_one_link_and_is_idempotent(monkeypatch):
@@ -146,12 +144,12 @@ def test_dispatch_sends_one_link_and_is_idempotent(monkeypatch):
     asyncio.run(dispatch_training_link(session_id, WEB_TRAINING_SCENARIO_ID))
     asyncio.run(
         dispatch_training_link(session_id, WEB_TRAINING_SCENARIO_ID)
-    )  # webhook re-delivery
+    )
 
     assert len(sent) == 1
     to, body = sent[0]
     assert to == "01055557777"
-    assert "/t/" in body  # the training link
+    assert "/t/" in body
     assert link_exists(session_id)
 
 
@@ -173,7 +171,6 @@ def test_dispatch_skips_other_scenarios(monkeypatch):
 
 
 def test_dispatch_skips_session_without_phone(monkeypatch):
-    # A session with no participant has no phone number to text.
     session_id = create_session(privacy=True, unannounced_training=True).id
 
     called = False
@@ -193,6 +190,7 @@ def test_dispatch_skips_session_without_phone(monkeypatch):
 def test_repeated_event_is_idempotent():
     client = _client()
     session_id, headers = _authenticated_session()
+    _call_report(session_id, score=60)
     token = create_link(session_id)
 
     for _ in range(3):
@@ -205,10 +203,7 @@ def test_repeated_event_is_idempotent():
         f"/v1/sessions/{session_id}/report", headers=headers
     ).json()
     # 60 - 25(금융정보), counted once
-    assert report["webTraining"]["score"] == 35
-
-
-# ---- closing the link after a risky action -------------------------------
+    assert report["draft"]["score"] == 35
 
 
 def test_risky_event_closes_the_link_for_reopening():
@@ -243,6 +238,7 @@ def test_defensive_event_keeps_the_link_open():
 def test_closed_link_still_accepts_events_from_the_open_page():
     client = _client()
     session_id, headers = _authenticated_session()
+    _call_report(session_id, score=60)
     token = create_link(session_id)
 
     client.post(
@@ -264,10 +260,7 @@ def test_closed_link_still_accepts_events_from_the_open_page():
         f"/v1/sessions/{session_id}/report", headers=headers
     ).json()
     # 60 - 25(금융정보) + 12(신고) = 47
-    assert report["webTraining"]["score"] == 47
-
-
-# ---- access log masking --------------------------------------------------
+    assert report["draft"]["score"] == 47
 
 
 def test_access_log_masks_the_link_token():
@@ -291,3 +284,159 @@ def test_access_log_masks_the_link_token():
         == "/v1/web-training/sessions/s1/link"
     )
     assert masked("/v1/sessions/s1/report") == "/v1/sessions/s1/report"
+
+
+def _connected_call(monkeypatch, scenario_id: str) -> tuple[str, list]:
+    from types import SimpleNamespace
+
+    from app.services import call_service, report_service
+    from app.services.report_service import bind_call
+    from app.services.session_service import attach_call
+
+    session_id, _ = _authenticated_session()
+    bind_call(session_id, "CAmid")
+    attach_call(session_id, "CAmid", scenario_id=scenario_id, agent_variant="external_tts")
+    monkeypatch.setattr(
+        report_service,
+        "_clawops_calls",
+        lambda: SimpleNamespace(get=lambda _id: SimpleNamespace(status="in-progress")),
+    )
+    monkeypatch.setenv("MID_CALL_SMS_DELAY_SEC", "0")
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        web_training_service,
+        "send_sms",
+        lambda to, body: sent.append((to, body)) or "MG123",
+    )
+
+    async def connect_twice() -> None:
+        await call_service.handle_call_status_event("CAmid")
+        await call_service.handle_call_status_event("CAmid")
+        await asyncio.gather(*list(call_service._background_tasks))
+
+    asyncio.run(connect_twice())
+    return session_id, sent
+
+
+def test_link_is_texted_during_the_call_once_it_connects(monkeypatch):
+    session_id, sent = _connected_call(monkeypatch, WEB_TRAINING_SCENARIO_ID)
+
+    assert len(sent) == 1
+    assert "/t/" in sent[0][1]
+    assert link_exists(session_id)
+
+
+def test_no_mid_call_text_for_scenarios_without_a_link(monkeypatch):
+    session_id, sent = _connected_call(monkeypatch, "bank_security_hold")
+
+    assert sent == []
+    assert not link_exists(session_id)
+
+
+def test_status_callback_asks_clawops_for_the_answered_event():
+    from app.services import call_service
+
+    events = call_service._STATUS_CALLBACK_EVENTS.split()
+    assert "answered" in events
+    assert "completed" in events
+    assert set(events) <= {"initiated", "ringing", "answered", "completed", "transfer"}
+
+
+def test_answered_callback_starts_the_timer_before_the_api_catches_up(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import call_service, report_service
+    from app.services.report_service import bind_call
+    from app.services.session_service import attach_call
+
+    session_id, _ = _authenticated_session()
+    bind_call(session_id, "CAlag")
+    attach_call(
+        session_id, "CAlag", scenario_id=WEB_TRAINING_SCENARIO_ID, agent_variant="external_tts"
+    )
+    monkeypatch.setattr(
+        report_service,
+        "_clawops_calls",
+        lambda: SimpleNamespace(get=lambda _id: SimpleNamespace(status="ringing")),
+    )
+    monkeypatch.setenv("MID_CALL_SMS_DELAY_SEC", "0")
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        web_training_service,
+        "send_sms",
+        lambda to, body: sent.append((to, body)) or "MG123",
+    )
+
+    async def answered() -> None:
+        await call_service.handle_call_status_event("CAlag", callback_status="in-progress")
+        await asyncio.gather(*list(call_service._background_tasks))
+
+    asyncio.run(answered())
+
+    assert len(sent) == 1
+    assert link_exists(session_id)
+
+
+def _call_report(session_id: str, *, score: int, risk=(), defense=()):
+    from app.schemas.report import BehaviorItem, TrainingReport
+    from app.services.report_service import _save_report, bind_call
+
+    bind_call(session_id, f"CA{session_id[-6:]}")
+    _save_report(
+        session_id,
+        TrainingReport(
+            score=score,
+            suspected=False,
+            gaveName=False,
+            triedHangup=True,
+            summary="통화 요약",
+            coaching="코칭",
+            riskBehaviors=[BehaviorItem(label=l, evidence=e) for l, e in risk],
+            defenseBehaviors=[BehaviorItem(label=l, evidence=e) for l, e in defense],
+            source="clawops",
+        ),
+        status="final",
+    )
+
+
+def test_opening_the_link_lowers_the_call_report():
+    from app.services.report_service import get_report
+
+    client = _client()
+    session_id, _ = _authenticated_session()
+    _call_report(session_id, score=75, defense=[("전화 종료(빠른 판단)", "끊을게요.")])
+    token = create_link(session_id)
+    client.post(f"/v1/web-training/{token}/events", json={"eventType": "link_opened"})
+
+    report = get_report(session_id)
+
+    assert report.draft is not None
+    assert report.draft.score == 60
+    assert [(b.label, b.evidence) for b in report.draft.riskBehaviors] == [
+        ("링크 접근 의사", "웹 훈련: 문자 링크 열람")
+    ]
+    assert [b.label for b in report.draft.defenseBehaviors] == ["전화 종료(빠른 판단)"]
+
+
+def test_link_risk_already_scored_in_the_call_is_not_deducted_twice():
+    from app.services.report_service import get_report
+
+    client = _client()
+    session_id, _ = _authenticated_session()
+    _call_report(session_id, score=45, risk=[("링크 접근 의사", "열어 볼게요.")])
+    token = create_link(session_id)
+    client.post(f"/v1/web-training/{token}/events", json={"eventType": "link_opened"})
+
+    report = get_report(session_id)
+
+    assert report.draft.score == 45
+    assert [b.label for b in report.draft.riskBehaviors] == ["링크 접근 의사"]
+
+
+def test_no_link_activity_leaves_the_call_report_alone():
+    from app.services.report_service import get_report
+
+    session_id, _ = _authenticated_session()
+    _call_report(session_id, score=75)
+
+    assert get_report(session_id).draft.score == 75

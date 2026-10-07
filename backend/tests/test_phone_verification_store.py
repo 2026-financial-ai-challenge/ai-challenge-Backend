@@ -1,5 +1,3 @@
-"""The store's own guarantees: expiry, atomic failure counting, single use."""
-
 from app import phone_verification_store as store
 from app.phone_verification_store import (
     claim_send_slot,
@@ -21,11 +19,6 @@ def setup_function() -> None:
 
 
 def test_a_challenge_expires_on_its_own():
-    """The reason this moved out of Postgres: nobody has to delete it.
-
-    The old phone_verifications row sat there until someone wrote a purge, and
-    nobody did -- so every phone number that ever asked for a code stayed.
-    """
     store_challenge(PHONE, "hashed", 300)
 
     assert read_challenge(PHONE) == {"code_hash": "hashed", "fail_count": "0"}
@@ -68,8 +61,6 @@ def test_a_token_is_spendable_once_and_remembers_being_spent():
 
     assert consume_token("tokenhash", spent_ttl_sec=600) == PHONE
     assert consume_token("tokenhash", spent_ttl_sec=600) is None
-    # The marker is what lets signup() answer "already used" rather than
-    # "never existed" for a replayed token.
     assert token_was_spent("tokenhash") is True
 
 

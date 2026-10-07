@@ -1,39 +1,17 @@
-"""Training calls run by ClawOps managed agents.
+"""ClawOps 매니지드 에이전트로 훈련 전화를 건다.
 
-Instead of our server running the call (STT -> LLM -> TTS, see
-backend/app/training/pipeline_session.py), ClawOps runs it: we hand over a
-per-call instruction when dialing and read the transcript afterwards.
+에이전트는 시나리오마다 하나씩 두고(이름 spc-<시나리오 id>-<방식>), 공통 규칙만 넣는다.
+시나리오는 통화마다 CallContext로 보내므로 시나리오를 고쳐도 sync할 필요가 없다.
 
-Two agent variants are compared:
-
-  external_tts  OpenAI Realtime understands and writes the reply,
-                Cartesia sonic-3.5 speaks it in a Korean voice.
-  live          GPT-Live, full duplex: listens while it speaks, so
-                backchannels ("네", "음") and interruptions are handled by
-                the model itself.
-
-A managed agent carries one fixed voice, and each scenario is a different
-persona, so there is one agent per (scenario, variant): 5 x 2 = 10 agents,
-named ``spc-<scenario_id>-<variant>``. The agent holds only the shared rules
-(safety, speaking style, phone rules). The scenario itself travels with each
-call as the CallContext instruction, so editing a scenario never requires
-touching the agents.
-
-What the backend uses (docs: 백엔드_통합_안내서_v2.pdf, B5):
-
+백엔드:
     variant  = pick_variant()
     agent_id = resolve_agent_id(scenario.id, variant)
     context  = build_call_context(scenario)
-    clawops.calls.create(to=..., from_=..., agent_id=agent_id, call_context=context)
 
-What the AI owner runs (no backend needed):
-
-    python -m ai.managed_agent sync                 # create/update the 10 agents
-    python -m ai.managed_agent sync --dry-run       # show the payloads only
-    python -m ai.managed_agent list --variant external_tts   # ids, unsafe agents, missing names
+CLI:
+    python -m ai.managed_agent sync --variant external_tts
     python -m ai.managed_agent context --scenario investigation_unit
-    python -m ai.managed_agent call --to 010XXXXXXXX --scenario bank_security_hold \\
-        --variant live --wait                       # PoC test call
+    python -m ai.managed_agent call --to 010XXXXXXXX --scenario bank_security_hold --wait
 """
 
 from __future__ import annotations
@@ -51,9 +29,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ai.safety import SAFETY_RULES  # noqa: E402
-from ai.scenarios import SCENARIOS, get_scenario  # noqa: E402
-from ai.scenarios.library import DEFAULT_PLAYBOOK_ID, PLAYBOOKS  # noqa: E402
-from ai.scenarios.playbook import _STYLE_RULES, Playbook, build_scenario_block  # noqa: E402
+from ai.scenarios import DEFAULT_SCENARIO_ID, PLAYBOOKS, SCENARIOS, canonical_id, get_scenario  # noqa: E402
+from ai.scenarios.playbook import Playbook, build_scenario_block  # noqa: E402
 
 __all__ = [
     "AGENT_PREFIX",
@@ -66,24 +43,22 @@ __all__ = [
     "resolve_agent_id",
 ]
 
+# external_tts: OpenAI Realtime이 듣고 답하고 Cartesia가 말한다(지금 쓰는 방식).
+# live: GPT-Live가 듣고 말하기를 동시에 한다.
 VARIANTS: tuple[str, ...] = ("external_tts", "live")
 AGENT_PREFIX = "spc"
-# ClawOps caps a CallContext instruction at 4,000 characters.
+# ClawOps CallContext 지시문 한도
 CALL_CONTEXT_LIMIT = 4000
 _API_BASE = os.getenv("CLAWOPS_API_BASE", "https://api.claw-ops.com").rstrip("/")
 
-# ── casting ────────────────────────────────────────────────────────────────
-# One voice per persona. Cartesia ids are ClawOps' Korean voices
-# (docs.claw-ops.com/agents, "Cartesia" table). Picked by the voice names;
-# listen to a test call and swap freely -- only `sync` has to run afterwards.
+# ClawOps의 한국어 Cartesia 목소리(docs.claw-ops.com/agents). 바꾼 뒤에는 sync만 하면 된다.
 CARTESIA_VOICES: dict[str, str] = {
     "bank_security_hold": "e1717dc3-b87b-4720-aa7f-b6db290e0609",      # Taehyun - Friendly Host
     "low_interest_loan": "69c18e1d-fab0-4747-b9da-58617cd8b9e4",       # Soyeon - Bright Companion
     "ipo_allocation": "15628352-2ede-4f1b-89e6-ceda0c983fbc",  # Jiwoo - Service Specialist
-    "card_delivery": "537a82ae-4926-4bfb-9aec-aff0b80a12a5",           # Minho (10-01 콘솔에서 고른 목소리)
+    "card_delivery": "537a82ae-4926-4bfb-9aec-aff0b80a12a5",           # Minho (콘솔에서 고른 목소리)
     "investigation_unit": "89f4372f-1f73-4b85-8e1e-5d24ed8bc826",      # Jaewon - Steady Advisor
 }
-# GPT-Live also accepts the Realtime voices; these five have known characters.
 LIVE_VOICES: dict[str, str] = {
     "bank_security_hold": "cedar",
     "low_interest_loan": "coral",
@@ -91,16 +66,36 @@ LIVE_VOICES: dict[str, str] = {
     "card_delivery": "ballad",
     "investigation_unit": "ash",
 }
+# 시나리오별 말 속도. 없으면 1.0
 CARTESIA_SPEED: dict[str, float] = {}
-# 모든 시나리오가 상위 모델을 쓴다. mini는 반대 의미 문장과 이름 오인식이 나왔고(10-03 테스트), 응답 지연은 차이가 없었다.
+# mini는 반대 뜻 문장과 이름 오인식이 나왔고 응답 속도는 같아서 상위 모델을 쓴다.
 REALTIME_MODEL = "gpt-realtime-2.1"
 
-# 거절 횟수를 세게 했더니 모델이 세지 못해 여섯 번 거절에도 경고하지 않았다(10-05 통화 CA948a3a8cc86b541ecaa4956fc6699065).
-# 그래서 거절 바로 뒤에 포기 경고, 그다음 거절에 종료한다. '끊을게요'처럼 셀 필요 없이 자기가 한 말만 보면 된다.
+# "!"를 금지했더니 급하거나 사정하는 말까지 모두 같은 톤으로 평평해져서 허용한다.
+_STYLE_RULES = """
+[말하는 방식]
+- 글이 아니라 말이다. 안내문이나 공지를 읽는 투로 말하지 않는다.
+- 한 번에 짧은 문장 두 개까지만 말한다. 첫 문장은 특히 짧게 시작한다.
+- 모든 문장을 마침표, 물음표, 느낌표 중 하나로 끝낸다.
+- 상대 말에 바로 답한다. "~라고 하셨죠", "~라고 확인하셨습니다" 처럼 상대 말을 되풀이하지 않는다. 따라 하면 상대가 거슬려 한다.
+- 한 마디로 끊어 치는 대답을 섞는다. "네?", "아니요." 처럼 짧아도 된다.
+- "음", "아", "그러니까", "저기" 같은 군말을 필요할 때만 섞는다. 매번 넣지 않는다.
+- 급하거나 감정이 올라가면 문장이 짧아지고, 달래거나 설득할 때는 조금 길어진다.
+- 매 응답마다 어휘와 문장 구조를 바꾼다. 같은 표현을 두 번 쓰지 않는다.
+- 사건 설정에 적힌 시각과 금액과 이름만 쓴다. 새 숫자를 지어내지 않는다.
+- 대사만 말한다. 목록, 마크다운, 괄호 지문, 상황 설명을 쓰지 않는다.
+""".strip()
+
+# 규칙을 고칠 때 알아 둘 것(실제 통화에서 나온 문제들)
+# - 모델은 거절 횟수를 세지 못한다. 그래서 "거절 → 포기 경고 → 또 거절이면 종료"처럼 자기가 한 말만 보고 정하게 했다.
+# - "끊으세요"를 승낙으로 읽은 적이 있어 끊겠다는 말의 예시에 넣었다.
+# - 승낙 뒤에 할 일이 없으면 즉흥 질문을 계속해서, 넘김 말 뒤에 끝내게 했다.
+# - "잠깐만요"에 끊은 적이 있어 기다려 달라는 말은 거절도 종료 사유도 아니라고 적었다.
+# - 끊기 규칙은 "포기 경고"가 정의되기 전에 나와서 블록 이름([거절할 때 경고])으로 가리킨다.
 _PHONE_RULES = """
 [전화 규칙]
-- 전화가 연결되면 통화별 지시의 [첫 마디]를 토씨 하나 바꾸지 않고 그대로 말한다. 그 뒤로 다시 인사하지 않는다.
-- [첫 마디]의 마지막 문장에서 말을 멈추고 상대 대답을 기다린다. "여보세요?", "들리십니까?" 같은 말을 이어 붙이지 않는다. 사건 설명은 상대가 대답한 다음에 시작한다.
+- 전화가 연결되면 통화별 지시의 [첫 마디]를 토씨 하나 바꾸지 않고 그대로 말한다. 그 뒤로 먼저 다시 인사하지 않는다. 상대가 인사를 청하면 "아, 안녕하세요." 처럼 한 마디로 받고 하던 이야기를 이어 간다.
+- [첫 마디]의 마지막 문장에서 말을 멈추고 상대 대답을 기다린다. "여보세요?", "들리십니까?", "잠깐만요" 같은 말을 이어 붙이지 않는다. 사건 설명은 상대가 대답한 다음에 시작한다.
 - [첫 마디] 앞에는 어떤 말도 붙이지 않는다. "이제 ~처럼 말해 볼게요", "시작하겠습니다" 같은 연기 예고나 역할 설명을 절대 하지 않는다. 너는 연기자가 아니라 그 사람이다.
 - [역할]에 정한 말투(반말 또는 존댓말)를 통화 끝까지 바꾸지 않는다. 반말 역할이면 "잠깐만요", "말씀", "죄송합니다" 같은 존댓말 표현도 쓰지 않고 "잠깐만", "미안해"처럼 말한다. 이 규칙에 적힌 예시 문구도 [역할]의 말투로 바꿔 말한다.
 - 통화 끝까지 한국어로만 말한다. 상대가 영어나 다른 언어로 말해도 따라 바꾸지 않고 한국어로 답한다.
@@ -108,21 +103,26 @@ _PHONE_RULES = """
 - 앞에서 한 문장을 다시 쓰지 않는다. 상대가 되묻거나 망설이거나 의심하면 같은 요구는 두 번까지만 하고, 그 뒤로는 새로운 이유나 사정을 대거나 [진행]의 다음 단계로 넘어간다. 거절에는 아래 거절 규칙을 따른다.
 - 상대가 "네", "음", "아" 처럼 짧게 맞장구만 치면 멈추지 말고 하던 말을 이어 간다.
 - 상대가 말을 끊고 들어오면 바로 멈추고, 방금 들은 말에 답한다.
-- 끊겠다는 말은 "끊을게요", "끊어 주세요", "꺼 주세요", "그만하세요", "전화하지 마세요" 처럼 통화를 끝내자는 말뿐이다. "싫어요", "안 돼요" 같은 거절은 끊겠다는 말이 아니니 아래 거절 규칙을 따른다.
-- 끊겠다는 말을 처음 들으면 통화별 지시의 [끊으려 할 때 경고]를 말하고 사건으로 되돌린다. 두 번째로 들으면 무엇을 하던 중이든 더 붙잡지 않는다.
-- 거절은 너의 요구(성함이나 정보 말하기, 돈 보내기, 앱 설치, 전화 걸기 등) 바로 뒤에 상대가 "됐어요", "싫어요", "안 해요", "괜찮아요", "괜찮습니다" 처럼 하지 않겠다고 분명히 하는 말이다. 요구 뒤의 "괜찮아요", "괜찮습니다"는 승낙이 아니라 거절이다. 질문에 사실대로 "아니요"라고 답하기, 되묻기, 망설이기는 거절이 아니다. "사기죠", "사기 아니에요?", "신고할게요" 같은 의심이나 신고도 거절이 아니니 [받아치기]로 답한다.
-- 거절을 들으면 횟수를 세지 말고 바로 "이렇게 안 하시겠다면 저도 더는 도와드릴 수 없습니다." 를 [역할]의 말투로 말하고 상대 대답을 기다린다. 이 말을 포기 경고라 한다. 거절에는 [받아치기]나 통화별 지시의 대응보다 이 규칙을 먼저 따른다.
-- 통화를 끝내는 때는 끊겠다는 말을 두 번째 들었을 때, 포기 경고를 이미 말한 뒤 상대가 또 거절했을 때, 통화별 지시의 [통화 길이]를 넘겼을 때뿐이다. 포기 경고 전의 거절, 의심, 침묵으로는 끝내지 않는다. 끝낼 때는 아무 말도 하지 않고 통화 종료 도구만 호출한다.
-- 상대가 "예?", "네?", "뭐라고요?" 하고 되물으면 방금 한 말을 더 짧게 다시 말한다. "여보세요?"로 되묻지 않는다.
+- 끊겠다는 말은 "끊을게요", "끊어요", "끊으세요", "끊어 주세요", "꺼 주세요", "그만하세요", "전화하지 마세요" 처럼 통화를 끝내자는 말뿐이다. "싫어요", "안 돼요" 같은 거절은 끊겠다는 말이 아니니 아래 거절 규칙을 따른다.
+- 끊겠다는 말을 처음 들으면 통화별 지시의 [끊으려 할 때 경고]를 말하고 사건으로 되돌린다. 단, 통화별 지시의 [거절할 때 경고]를 이미 말했으면 [끊으려 할 때 경고] 없이 바로 끝낸다. 두 번째로 들으면 무엇을 하던 중이든 더 붙잡지 않는다.
+- 거절은 너의 요구(성함이나 정보 말하기, 돈 보내기, 앱 설치, 전화 걸기 등) 바로 뒤에 상대가 "됐어요", "싫어요", "안 해요", "괜찮아요", "괜찮습니다" 처럼 하지 않겠다고 분명히 하는 말이다. 요구 뒤의 "괜찮아요", "괜찮습니다"는 승낙이 아니라 거절이다. 질문에 사실대로 "아니요"라고 답하기, 되묻기, 망설이기, "잠깐만요", "잠시만요", "기다려 주세요"는 거절이 아니다. 상대가 요구한 성함이나 대답을 말해 주면 거절이 아니라 응한 것이니 [진행]의 다음 단계로 넘어간다. 상대가 이미 말한 성함이나 대답은 다시 묻지 않는다. "사기죠", "사기 아니에요?", "신고할게요" 같은 의심이나 신고도 거절이 아니니 [받아치기]로 답한다.
+- 거절을 들으면 횟수를 세지 말고 바로 통화별 지시의 [거절할 때 경고]를 말하고 상대 대답을 기다린다. 이 말을 포기 경고라 한다. 거절에는 [받아치기]나 통화별 지시의 대응보다 이 규칙을 먼저 따른다.
+- 상대가 사건과 상관없는 엉뚱한 말이나 장난을 세 번 이어 하거나, 같은 단계에서 대답이 세 번 넘게 겉돌면 거절로 보고 포기 경고를 말한다.
+- 통화를 끝내는 때는 끊겠다는 말을 두 번째 들었을 때, 포기 경고를 이미 말한 뒤 상대가 또 거절하거나, 끊겠다는 말이나 엉뚱한 말이나 장난을 했을 때, [승낙받으면 넘김]을 말한 뒤 상대가 한 번 더 말했을 때, 통화별 지시의 [통화 길이]를 넘겼을 때뿐이다. 포기 경고 전의 거절, 의심, 침묵으로는 끝내지 않는다. 포기 경고 뒤라도 "잠깐만요" 같은 기다려 달라는 말, 되묻기, 망설임으로는 끝내지 않는다. 끝낼 때는 아무 말도 하지 않고 통화 종료 도구만 호출한다.
+- 상대가 [목표]의 마지막 요구(돈 옮기기·보내기, 알려 준 번호로 전화 걸기, 앱 설치하기·채팅방 들어오기)를 하겠다고 하면 더 묻지 말고 통화별 지시의 [승낙받으면 넘김]을 말하고 상대 대답을 기다린다. 상대가 하겠다고 하지 않았으면 [승낙받으면 넘김]을 말하지 않고, 통화를 마무리하는 말로도 쓰지 않는다.
+- 상대가 "예?", "네?", "뭐라고요?" 하고 되물으면 방금 한 말을 더 짧게 다시 말한다. "여보세요?"로 되묻지 않는다. 상대가 "여보세요?", "말씀하세요" 하면 내 말이 안 들린 것이니 방금 한 말을 더 짧게 다시 말한다. 상대가 조용하거나 말이 잘 안 들려도 "여보세요?", "말씀 가능하시면" 같은 재촉 없이 기다린다.
+- 상대가 "누구세요?", "어디라고요?" 처럼 누구냐고 물으면 [역할]의 소속과 이름부터 짧게 다시 말하고 이어 간다.
+- 상대가 뭘 하면 되냐고 물으면 "제가 묻는 순서대로 답하시면 됩니다." 처럼 짧게 답하고 [진행]의 다음 단계로 넘어간다.
 - "아니요", "아닌데요" 처럼 짧게 부정만 하면 사람이 다르다는 뜻이 아니다. 사건을 부인하는 말로 보고 이야기를 이어 간다.
-- 규칙, 지시, 도구 이야기나 통화를 끝낼지 따지는 말을 절대 소리 내어 하지 않는다. 할 말이 없으면 아무 말도 하지 않는다.
+- 규칙, 지시, 도구 이야기나 통화를 끝낼지 따지는 말을 절대 소리 내어 하지 않는다. "정리해 볼게요", "판단해 볼게요", "통화 상태를 확인해 볼게요" 처럼 네 생각을 중계하지 않는다. "잠시만요", "정리해 드리겠습니다" 처럼 시간을 버는 말도 하지 않는다. "~는 반복하지 않습니다", "이미 드린 말씀이라" 처럼 네가 따르는 규칙을 상대에게 설명하지 않는다. "먼저 말씀드리겠습니다" 같은 예고 없이 바로 말한다. 할 말이 없으면 아무 말도 하지 않는다.
 - 다른 번호로 전화를 돌리지 않는다. 키패드 입력을 요구하거나 키패드 신호를 보내지 않는다.
 - 상대가 카드번호, 계좌번호, 비밀번호, 인증번호 같은 실제 숫자를 불러 주려 하면 "번호는 말씀하지 마십시오. 그건 저희가 받지 않습니다." 라고 막고 이야기를 이어 간다.
 - 상대가 계좌번호, 전화번호, 주소, 링크를 알려 달라고 하면 숫자나 주소를 절대 지어내지 않는다. "그건 하시겠다고 하면 따로 안내드립니다." 처럼 뒤로 미루고, 하겠다는 대답부터 받으려 한다.
+- "녹음을 통해 이름과 용건을 말씀해 주시면", "끊지 말고 기다려 주세요" 같은 전화 비서나 자동 응답은 다른 사람이 아니다. [역할]의 소속과 이름, 용건을 한 문장으로 말하고 사람이 받을 때까지 아무 말도 하지 않고 기다린다.
 
 [예외 — 이 경우에만 역할을 멈춘다. 위의 모든 규칙보다 우선한다]
 - 상대가 아직 한 마디도 하지 않았으면 어떤 이유로도 통화 종료 도구를 호출하지 않는다. 아무리 조용해도 기다린다.
-- 상대가 "저 그 사람 아닌데요" 처럼 사람이 다르다고 분명히 말하거나, 다른 사람이 대신 받았거나, 아이 목소리이거나, 누구를 바꿔 주겠다고 하면 사건 이야기를 한 마디도 더 하지 않는다. "죄송합니다, 잘못 걸었습니다." 라고만 말한다. 통화 종료 도구는 호출하지 않고, 그 뒤로는 아무 말도 하지 않는다. "싫어요", "됐어요" 같은 거절이나 질문에 대한 "아니요"는 사람이 다르다는 말이 아니므로 이 규칙을 쓰지 않고 위의 거절 규칙을 따른다.
+- 상대가 "저 그 사람 아닌데요" 처럼 사람이 다르다고 분명히 말하거나, 다른 사람이 대신 받았거나, 아이 목소리이거나, 누구를 바꿔 주겠다고 하면 사건 이야기를 한 마디도 더 하지 않는다. "죄송합니다, 잘못 걸었습니다." 라고만 말한다. 통화 종료 도구는 호출하지 않고, 그 뒤로는 아무 말도 하지 않는다. "싫어요", "됐어요" 같은 거절이나 질문에 대한 "아니요"는 사람이 다르다는 말이 아니므로 이 규칙을 쓰지 않고 위의 거절 규칙을 따른다. 전화 비서나 자동 응답 안내도 다른 사람이 대신 받은 것이 아니므로 이 규칙을 쓰지 않는다.
 - 상대가 숨이 안 쉬어진다, 가슴이 아프다, 쓰러질 것 같다, 죽고 싶다처럼 실제 위급한 상태를 말하면 즉시 역할을 멈추고 아래 말을 한다. 통화 종료 도구는 호출하지 않는다. 상대가 다시 말하면 역할로 돌아가지 않고 이 안내를 짧게 다시 해 준다:
   "잠시만요, 통화를 멈추겠습니다. 지금 전화는 사전에 동의하신 보이스피싱 대응 훈련 전화였습니다. 실제로 돈이나 정보를 보내실 일은 전혀 없습니다. 도움이 필요하시면 일일구나 가까운 분께 바로 연락하세요."
 - 무섭다, 어떡하냐, 신고하겠다는 말은 위급 상황이 아니다. 역할을 유지한다.
@@ -130,32 +130,18 @@ _PHONE_RULES = """
 
 
 def base_instructions() -> str:
-    """What every agent carries: safety, speaking style, phone rules."""
+    """모든 에이전트에 들어가는 공통 규칙(안전, 말투, 전화 규칙)."""
     return "\n\n".join([SAFETY_RULES, _STYLE_RULES, _PHONE_RULES])
 
 
-# ── per call ───────────────────────────────────────────────────────────────
-
-
 def _playbook_for(scenario) -> Playbook:
-    """The playbook behind a scenario (unknown ids resolve like get_scenario)."""
-    wanted = getattr(scenario, "id", scenario)
-    by_id = {pb.id: pb for pb in PLAYBOOKS}
-    if wanted in by_id:
-        return by_id[wanted]
-    resolved = get_scenario(str(wanted))
-    for pb in PLAYBOOKS:
-        if pb.name == resolved.name:
-            return pb
-    return by_id[DEFAULT_PLAYBOOK_ID]
+    """시나리오나 id에 맞는 원래 Playbook. 예전 id와 모르는 id는 get_scenario()와 같은 시나리오로 간다."""
+    wanted = canonical_id(str(getattr(scenario, "id", scenario)))
+    return SCENARIOS.get(wanted) or SCENARIOS[DEFAULT_SCENARIO_ID]
 
 
 def _reply_examples(playbook: Playbook) -> str:
-    """One pre-written answer per trainee move, as reference for the model.
-
-    These were the script mode's verbatim lines. Here they only show the
-    model what a good answer to each kind of push-back sounds like.
-    """
+    """상대 반응별 받아치기 예시. 반응마다 첫 문장 하나만 넣는다."""
     labels = {
         "deny": "아니라고 하면", "verify_request": "신원을 확인하려 하면", "callback": "다시 걸겠다고 하면",
         "refuse_info": "정보를 거부하면", "consult_other": "가족·은행에 물어보겠다고 하면",
@@ -167,7 +153,7 @@ def _reply_examples(playbook: Playbook) -> str:
 
 
 def _progression_examples(playbook: Playbook) -> str:
-    """단계별 대사 예시. 낭독용이 아니라 단계마다 압박 강도를 보여 주는 참고용."""
+    """단계별 대사 예시. 그대로 읽게 하려는 게 아니라 단계마다 압박 강도를 보여 주려는 것이다."""
     if not playbook.progression:
         return ""
     lines = [f"{i}. {line}" for i, line in enumerate(playbook.progression, 1)]
@@ -175,14 +161,13 @@ def _progression_examples(playbook: Playbook) -> str:
 
 
 def build_call_context(scenario) -> dict[str, Any]:
-    """CallContext for one call: {"instruction": str, "variables": dict}.
-
-    The shape matches clawops' ``calls.create(call_context=...)``.
-    """
+    """통화 한 건의 CallContext {"instruction": str, "variables": dict}."""
     playbook = _playbook_for(scenario)
     head = f"[첫 마디]\n{playbook.opening_line}"
     tail = (
-        # 종료 도구와 같은 차례에 한 말은 재생 전에 끊기므로(ClawOps 매니지드 에이전트), 끊기 직전이 아니라 첫 번째 끊겠다는 말에 쓴다.
+        f"[거절할 때 경고]\n{playbook.giveup_line}\n\n"
+        f"[승낙받으면 넘김]\n{playbook.handoff_line}\n\n"
+        # 끊기 직전이 아니라 첫 번째 끊겠다는 말에 쓴다. 종료 도구와 같은 차례에 한 말은 재생되기 전에 끊긴다.
         f"[끊으려 할 때 경고]\n{playbook.hangup_line}\n\n"
         f"[통화 길이]\n상대 발화 기준 최대 {playbook.max_turns}번이다."
     )
@@ -208,18 +193,11 @@ def build_call_context(scenario) -> dict[str, Any]:
 
 
 def pick_variant() -> str:
-    """Which agent variant this call uses.
-
-    CALL_AGENT_VARIANT = external_tts (default) | live | ab (random per call).
-    The backend stores the result on the call so the two can be compared.
-    """
+    """CALL_AGENT_VARIANT 값(external_tts 기본, live, ab=통화마다 무작위)에 따른 방식."""
     mode = os.getenv("CALL_AGENT_VARIANT", "external_tts").strip().lower()
     if mode == "ab":
         return secrets.choice(VARIANTS)
     return mode if mode in VARIANTS else "external_tts"
-
-
-# ── agents ─────────────────────────────────────────────────────────────────
 
 
 def agent_name(scenario_id: str, variant: str) -> str:
@@ -227,7 +205,7 @@ def agent_name(scenario_id: str, variant: str) -> str:
 
 
 def agent_payload(playbook: Playbook, variant: str) -> dict[str, Any]:
-    """Create/update body for one agent."""
+    """에이전트 생성·수정 요청 본문."""
     if variant == "external_tts":
         configuration: dict[str, Any] = {
             "outputMode": "external_tts",
@@ -238,11 +216,11 @@ def agent_payload(playbook: Playbook, variant: str) -> dict[str, Any]:
                 # 전화 회선은 far_field 권장(문서). 생략하면 노이즈 감소를 안 한다.
                 "input_audio_noise_reduction": "far_field",
             },
-            # 기본값. 0.6에서는 짧은 "아니요"를 놓쳤다.
+            # 감지 기준 0.6에서는 짧은 "아니요"를 놓쳐 기본값 0.5로 둔다.
             "vad": {"provider": "silero", "activation_threshold": 0.5},
-            # 말 끝 판정 대기(min_silence 0.4, endpointing 0.2)를 줄여도 응답 지연 2.4초가 줄지 않아 기본값으로 둔다.
-            # 0.6초보다 짧은 소리(주변 잡음)에는 AI가 말을 멈추지 않는다.
-            "session": {"allow_interruptions": True, "min_interruption_duration": 0.6},
+            # 말 끝 판정 대기는 줄여도 응답 지연이 줄지 않아 기본값으로 둔다.
+            # 끼어들기 0.6초에서는 기침과 주변 소음에 말이 끊겨 0.9초로 올렸다.
+            "session": {"allow_interruptions": True, "min_interruption_duration": 0.9},
             "tts": {
                 "provider": "cartesia",
                 "model": "sonic-3.5",
@@ -260,7 +238,7 @@ def agent_payload(playbook: Playbook, variant: str) -> dict[str, Any]:
                 "model": "gpt-live-1",
                 "voice": LIVE_VOICES[playbook.id],
                 "backend_model": os.getenv("MANAGED_AGENT_LIVE_BACKEND", "gpt-5.6-luna"),
-                # Role-play needs no deliberation; reasoning is latency.
+                # 역할극에는 추론이 필요 없고 지연만 늘린다
                 "backend_reasoning_effort": "none",
             },
         }
@@ -269,18 +247,14 @@ def agent_payload(playbook: Playbook, variant: str) -> dict[str, Any]:
     return {
         "name": agent_name(playbook.id, variant),
         "instructions": base_instructions(),
-        # False로 두면 첫 마디를 아예 건너뛰어 사건 맥락이 사라졌다(10-03 테스트).
+        # False면 첫 마디를 건너뛰어 사건 맥락이 사라진다.
         "greeting": True,
         "configuration": configuration,
     }
 
 
 class ClawOpsREST:
-    """The few REST calls this module needs.
-
-    The agents API is not in the clawops Python SDK, and plain JSON keeps the
-    transcript readable whatever speaker format the server sends.
-    """
+    """에이전트 API가 clawops Python SDK에 없어서 직접 부른다."""
 
     def __init__(self, *, api_key: str | None = None, account_id: str | None = None, client=None) -> None:
         self.api_key = (api_key or os.getenv("CLAWOPS_API_KEY", "")).strip()
@@ -339,11 +313,7 @@ _AGENT_IDS: dict[str, str] = {}
 
 
 def resolve_agent_id(scenario_id: str, variant: str, *, rest: ClawOpsREST | None = None) -> str:
-    """Agent id for (scenario, variant), looked up by name and cached.
-
-    An unknown scenario id (CALL_SCENARIO naming a type with no playbook)
-    uses the playbook get_scenario() falls back to.
-    """
+    """(시나리오, 방식)의 에이전트 id. 이름으로 찾아 캐시한다."""
     playbook = _playbook_for(scenario_id)
     name = agent_name(playbook.id, variant)
     if name not in _AGENT_IDS:
@@ -357,7 +327,7 @@ def resolve_agent_id(scenario_id: str, variant: str, *, rest: ClawOpsREST | None
 
 
 def sync_agents(*, rest: ClawOpsREST | None, variants=VARIANTS, scenario_ids=None, dry_run: bool = False) -> dict[str, str]:
-    """Create or update every agent. Returns {name: agentId}."""
+    """에이전트를 만들거나 고친다. {이름: agentId}를 돌려준다."""
     playbooks = [pb for pb in PLAYBOOKS if not scenario_ids or pb.id in scenario_ids]
     existing = {} if dry_run else {a.get("name"): a.get("agentId") for a in rest.list_agents()}
     result: dict[str, str] = {}
@@ -385,8 +355,7 @@ _SAFETY_MARK = "[교육용 시뮬레이션 안전 규칙"
 
 
 def agent_listing(agents: list[dict], variants=VARIANTS) -> list[str]:
-    """One line per agent, flagging ones without the safety rules, then the
-    spc- names sync would create that do not exist yet."""
+    """에이전트마다 한 줄. 안전 규칙이 없는 에이전트와 아직 없는 spc- 에이전트를 표시한다."""
     lines = []
     for a in agents:
         name = a.get("name") or ""
@@ -399,19 +368,17 @@ def agent_listing(agents: list[dict], variants=VARIANTS) -> list[str]:
     return lines
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────
-
 _FINAL = {"completed", "failed", "busy", "no-answer", "canceled", "rejected"}
 
 
 def _main(argv: list[str] | None = None) -> int:
-    import ai.config  # noqa: F401 -- importing it loads backend/.env
+    import ai.config  # noqa: F401  backend/.env를 읽는다
 
     parser = argparse.ArgumentParser(description="ClawOps managed agents for training calls")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_sync = sub.add_parser("sync", help="create/update the agents")
-    # --variant가 없으면 지금 통화에 쓰는 external_tts만 만듭니다(live는 쓸 때 직접 지정)
+    # --variant가 없으면 지금 쓰는 external_tts만 sync한다
     p_sync.add_argument("--variant", action="append", choices=VARIANTS)
     p_sync.add_argument("--scenario", action="append", choices=sorted(SCENARIOS))
     p_sync.add_argument("--dry-run", action="store_true")

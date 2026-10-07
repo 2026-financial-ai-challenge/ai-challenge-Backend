@@ -15,9 +15,6 @@ services:
     environment:
       DATABASE_URL: "postgresql://safety_phishing_user:${LOCAL_DB_PASSWORD}@db:5432/safety_phishing_call"
       REDIS_URL: "redis://redis:6379/0"
-      TTS_CACHE_DIR: "/data/tts-cache"
-    volumes:
-      - tts_cache:/data/tts-cache
     depends_on:
       db:
         condition: service_healthy
@@ -70,5 +67,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  tts_cache:
   caddy_data:

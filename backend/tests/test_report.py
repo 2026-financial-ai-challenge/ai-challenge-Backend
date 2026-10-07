@@ -12,21 +12,18 @@ from app.models.call import Call
 from app.models.participant import Participant
 from app.models.scheduled_training import ScheduledTraining
 from app.models.training_session import TrainingSession
-from app.schemas.report import BehaviorItem, TrainingReport, TranscriptTurn
+from app.schemas.report import BehaviorItem, TrainingReport
 from app.services import report_service
 from app.services import call_service
 from app.services.report_service import (
-    append_turn,
     bind_call,
-    build_draft_report,
     build_final_report,
     calculate_response_score,
     format_clawops_segments,
-    format_live_turns,
     get_report,
     heuristic_report,
-    register_transcript_listener,
     score_conversation,
+    _combine_reports,
     _scenario_report_note,
 )
 from app.services.session_service import attach_call, create_session, reset_sessions
@@ -73,7 +70,9 @@ def _llm_payload(**overrides) -> str:
     payload = {
         "suspected": True,
         "gaveName": True,
+        "gaveNameEvidence": "김민수입니다",
         "triedHangup": True,
+        "triedHangupEvidence": "끊겠습니다",
         "summary": "상대가 이상 거래를 말하며 성함을 물었다.",
         "coaching": "이름을 대지 말고 공식 번호로 다시 확인하세요.",
         "riskBehaviors": [{"label": "개인정보 제공", "evidence": "김민수입니다"}],
@@ -97,16 +96,7 @@ def _fake_openai(content: str):
     return SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
 
 
-def test_format_live_turns_and_clawops_segments():
-    text = format_live_turns(
-        [
-            TranscriptTurn(role="assistant", text="이상 거래입니다"),
-            TranscriptTurn(role="user", text="김민수입니다"),
-        ]
-    )
-    assert "[상대] 이상 거래입니다" in text
-    assert "[훈련자] 김민수입니다" in text
-
+def test_format_clawops_segments():
     clawops = format_clawops_segments(
         [
             {"speaker": "AGENT", "text": "성함 확인합니다"},
@@ -123,11 +113,11 @@ def test_heuristic_report_flags():
         "[훈련자] 저는 김민수입니다\n"
         "[훈련자] 지금은 끊겠습니다"
     )
-    report = heuristic_report(transcript, source="live")
+    report = heuristic_report(transcript)
     assert report.suspected is True
     assert report.gaveName is True
     assert report.triedHangup is True
-    assert report.source == "live"
+    assert report.source == "clawops"
 
 
 def test_assistant_only_transcript_has_no_trainee_behaviors():
@@ -137,7 +127,6 @@ def test_assistant_only_transcript_has_no_trainee_behaviors():
     report = asyncio.run(
         score_conversation(
             transcript,
-            source="live",
             client=_fake_openai(_llm_payload()),
         )
     )
@@ -208,14 +197,13 @@ def test_score_conversation_uses_llm_and_filters_labels():
     report = asyncio.run(
         score_conversation(
             "[상대] 성함을 말씀하십시오\n[훈련자] 김민수입니다. 끊겠습니다",
-            source="live",
             client=_fake_openai(raw),
         )
     )
     assert report.score == 60
     assert report.gaveName is True
     assert [item.label for item in report.riskBehaviors] == ["개인정보 제공"]
-    assert report.source == "live"
+    assert report.source == "clawops"
 
 
 def test_score_conversation_rejects_assistant_evidence():
@@ -230,7 +218,6 @@ def test_score_conversation_rejects_assistant_evidence():
     report = asyncio.run(
         score_conversation(
             "[상대] 성함을 말씀하십시오\n[훈련자] 끊겠습니다",
-            source="live",
             client=_fake_openai(raw),
         )
     )
@@ -257,19 +244,14 @@ def test_score_conversation_falls_back_on_bad_json():
     report = asyncio.run(
         score_conversation(
             "[훈련자] 지금은 끊겠습니다",
-            source="live",
             client=_fake_openai("not-json"),
         )
     )
     assert report.triedHangup is True
-    assert report.source == "live"
+    assert report.source == "clawops"
 
 
 def test_report_llm_falls_back_to_gemini_when_openai_fails(monkeypatch):
-    """No explicit client (the real call path): OpenAI is tried first, and a
-    failure there (quota exhausted, auth revoked, ...) must not lose the
-    report -- it should fall through to Gemini rather than degrading straight
-    to the heuristic report."""
     monkeypatch.setattr(
         report_service,
         "_report_llm_attempts",
@@ -288,7 +270,6 @@ def test_report_llm_falls_back_to_gemini_when_openai_fails(monkeypatch):
     report = asyncio.run(
         score_conversation(
             "[상대] 성함을 말씀하십시오\n[훈련자] 확인해보겠습니다",
-            source="live",
             client=None,
         )
     )
@@ -311,12 +292,9 @@ def test_report_llm_degrades_to_heuristic_when_every_provider_fails(monkeypatch)
     report = asyncio.run(
         score_conversation(
             "[상대] 성함을 말씀하십시오\n[훈련자] 지금은 끊겠습니다",
-            source="live",
             client=None,
         )
     )
-    # score_conversation swallows the exhausted-provider error and still
-    # returns a usable (non-LLM) report rather than raising into the caller.
     assert report.triedHangup is True
 
 
@@ -326,72 +304,13 @@ def test_report_llm_raises_clearly_when_no_provider_is_configured(monkeypatch):
     report = asyncio.run(
         score_conversation(
             "[상대] 성함을 말씀하십시오\n[훈련자] 지금은 끊겠습니다",
-            source="live",
             client=None,
         )
     )
-    # Still degrades gracefully -- callers never see the missing-key error.
     assert report.triedHangup is True
 
 
-def test_draft_then_final_report(monkeypatch):
-    session_id = _session_id()
-    bind_call(session_id, "CAtest")
-    append_turn(session_id, "assistant", "이상 거래가 확인되어 연락드렸습니다.")
-    append_turn(session_id, "user", "저는 김민수입니다. 끊겠습니다.")
-
-    draft = asyncio.run(
-        build_draft_report(session_id, client=_fake_openai(_llm_payload()))
-    )
-    assert draft.source == "live"
-    stored = get_report(session_id)
-    assert stored.status == "draft"
-    assert stored.callId == "CAtest"
-    assert len(stored.turns) == 2
-
-    monkeypatch.setattr(
-        report_service,
-        "fetch_clawops_transcript",
-        lambda call_id: SimpleNamespace(
-            status="completed",
-            segments=[
-                SimpleNamespace(speaker="AGENT", text="성함 확인합니다"),
-                SimpleNamespace(
-                    speaker="CUSTOMER", text="김민수입니다. 끊겠습니다."
-                ),
-            ],
-        ),
-    )
-    monkeypatch.setattr(
-        report_service,
-        "fetch_clawops_summary",
-        lambda call_id: {"topic": "account alert"},
-    )
-    final = asyncio.run(
-        build_final_report(
-            session_id,
-            "CAtest",
-            client=_fake_openai(_llm_payload(summary="녹음 기준 최종 요약입니다.")),
-        )
-    )
-    assert final is not None
-    assert final.source == "clawops"
-    stored = get_report(session_id)
-    assert stored.status == "final"
-    # The recording-based report replaces the live draft as the first-call
-    # result; with no unannounced call there is nothing to compare.
-    assert stored.draft is not None and stored.draft.source == "clawops"
-    assert stored.final is None
-    assert stored.clawopsSummary == {"topic": "account alert"}
-
-
 def test_final_report_is_scored_against_the_scenario_the_call_ran(monkeypatch):
-    """The scenario stored on the call reaches score_conversation.
-
-    Without this the report was always scored against get_call_scenario()'s
-    default, so a trainee who took the delivery scam got coaching written for
-    a different one.
-    """
     ensure_ai_importable()
     from ai.scenarios import SCENARIOS
 
@@ -422,7 +341,7 @@ def test_final_report_is_scored_against_the_scenario_the_call_ran(monkeypatch):
 
     async def fake_score(transcript, **kwargs):
         seen["scenario_id"] = getattr(kwargs.get("scenario"), "id", None)
-        return heuristic_report(transcript, source="clawops")
+        return heuristic_report(transcript)
 
     monkeypatch.setattr(report_service, "score_conversation", fake_score)
 
@@ -431,81 +350,7 @@ def test_final_report_is_scored_against_the_scenario_the_call_ran(monkeypatch):
     assert seen["scenario_id"] == ran
 
 
-def test_unannounced_report_becomes_source_session_final(monkeypatch):
-    source_session_id, _headers = _authenticated_session()
-    bind_call(source_session_id, "CAannounced")
-    append_turn(source_session_id, "user", "누구세요")
-    asyncio.run(
-        build_draft_report(
-            source_session_id,
-            client=_fake_openai(_llm_payload(summary="첫 번째 통화 결과")),
-        )
-    )
-
-    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
-    schedule_unannounced_training(
-        source_session_id,
-        now=now,
-        delay_seconds=1800,
-    )
-    monkeypatch.setenv("CLAWOPS_UNANNOUNCED_PHONE_NUMBER", "07011112222")
-    monkeypatch.setattr(call_service, "start_training_calls", lambda *_args: None)
-    process_due_scheduled_trainings(now=now + timedelta(minutes=31))
-
-    with SessionLocal() as db:
-        scheduled = db.scalar(select(ScheduledTraining))
-        assert scheduled is not None
-        assert scheduled.result_session_id is not None
-        result_session_id = scheduled.result_session_id
-
-    bind_call(result_session_id, "CAunannounced")
-    append_turn(result_session_id, "assistant", "지금 바로 송금해 주세요")
-    append_turn(result_session_id, "user", "공식 번호로 확인할게요")
-    asyncio.run(
-        build_draft_report(
-            result_session_id,
-            client=_fake_openai(
-                _llm_payload(
-                    summary="불시 전화 결과",
-                    gaveName=False,
-                    riskBehaviors=[],
-                )
-            ),
-        )
-    )
-
-    combined = get_report(source_session_id)
-    assert combined.status == "final"
-    assert combined.callId == "CAunannounced"
-    assert combined.draft is not None
-    assert combined.draft.summary == "첫 번째 통화 결과"
-    assert combined.unannounced is not None
-    assert combined.unannounced.summary == "불시 전화 결과"
-    assert combined.final is not None
-    assert combined.final.source == "comparison"
-    assert combined.final.score == round(
-        (combined.draft.score + combined.unannounced.score) / 2
-    )
-    assert "1차 전화는" in combined.final.summary
-    assert "불시 전화는" in combined.final.summary
-    assert combined.draftTurns[0].text == "누구세요"
-    assert [turn.text for turn in combined.unannouncedTurns] == [
-        "지금 바로 송금해 주세요",
-        "공식 번호로 확인할게요",
-    ]
-    assert [turn.text for turn in combined.turns] == [
-        "지금 바로 송금해 주세요",
-        "공식 번호로 확인할게요",
-    ]
-
-    with SessionLocal() as db:
-        source = db.get(TrainingSession, source_session_id)
-        assert source is not None
-        assert source.report_status == "final"
-
-
-def _clawops_report(monkeypatch, session_id, call_id, segments, summary):
-    """Build the recording-based report the way a managed call does: no live draft."""
+def _clawops_report(monkeypatch, session_id, call_id, segments, summary, clawops_summary=None):
     bind_call(session_id, call_id)
     monkeypatch.setattr(
         report_service,
@@ -518,7 +363,9 @@ def _clawops_report(monkeypatch, session_id, call_id, segments, summary):
             ],
         ),
     )
-    monkeypatch.setattr(report_service, "fetch_clawops_summary", lambda _call_id: None)
+    monkeypatch.setattr(
+        report_service, "fetch_clawops_summary", lambda _call_id: clawops_summary
+    )
     asyncio.run(
         build_final_report(
             session_id, call_id, client=_fake_openai(_llm_payload(summary=summary))
@@ -526,7 +373,7 @@ def _clawops_report(monkeypatch, session_id, call_id, segments, summary):
     )
 
 
-def test_managed_call_report_carries_its_recorded_turns(monkeypatch):
+def test_call_report_carries_its_recorded_turns(monkeypatch):
     session_id = _session_id()
     _clawops_report(
         monkeypatch,
@@ -534,11 +381,14 @@ def test_managed_call_report_carries_its_recorded_turns(monkeypatch):
         "CAmanaged",
         [("AGENT", "성함 확인합니다"), ("CUSTOMER", "김민수입니다. 끊겠습니다.")],
         "녹음 기준 요약",
+        clawops_summary={"topic": "account alert"},
     )
 
     stored = get_report(session_id)
 
     assert stored.status == "final"
+    assert stored.callId == "CAmanaged"
+    assert stored.clawopsSummary == {"topic": "account alert"}
     assert stored.draft is not None and stored.draft.summary == "녹음 기준 요약"
     assert stored.unannounced is None
     assert stored.final is None
@@ -549,8 +399,7 @@ def test_managed_call_report_carries_its_recorded_turns(monkeypatch):
     assert len(stored.draftTurns) == 2
 
 
-def test_managed_calls_compare_first_and_unannounced_reports(monkeypatch):
-    """Both calls only have recording-based reports, as every managed call does."""
+def test_first_and_unannounced_reports_are_compared(monkeypatch):
     source_session_id, _headers = _authenticated_session()
     _clawops_report(
         monkeypatch,
@@ -593,6 +442,10 @@ def test_managed_calls_compare_first_and_unannounced_reports(monkeypatch):
         "택배 기사입니다",
         "공식 번호로 확인할게요",
     ]
+    assert combined.final.score == round((combined.draft.score + combined.unannounced.score) / 2)
+    assert "1차 전화는" in combined.final.summary
+    with SessionLocal() as db:
+        assert db.get(TrainingSession, source_session_id).report_status == "final"
 
 
 def test_failed_unannounced_call_leaves_first_report_and_no_comparison(monkeypatch):
@@ -618,7 +471,48 @@ def test_failed_unannounced_call_leaves_first_report_and_no_comparison(monkeypat
     assert [turn.text for turn in stored.draftTurns] == ["검찰청입니다", "누구세요"]
 
 
-def test_get_report_api_none_then_draft(monkeypatch):
+def test_final_report_lists_both_calls_behaviors_and_averages_the_score():
+    announced = TrainingReport(
+        score=5,
+        suspected=False,
+        gaveName=True,
+        triedHangup=False,
+        summary="1차",
+        coaching="1차 코칭",
+        riskBehaviors=[
+            BehaviorItem(label="개인정보 제공", evidence="류상준입니다."),
+            BehaviorItem(label="통화 장시간 지속", evidence="네, 네."),
+        ],
+        defenseBehaviors=[],
+        source="clawops",
+    )
+    unannounced = TrainingReport(
+        score=83,
+        suspected=True,
+        gaveName=False,
+        triedHangup=True,
+        summary="불시",
+        coaching="불시 코칭",
+        riskBehaviors=[BehaviorItem(label="통화 장시간 지속", evidence="네, 네.")],
+        defenseBehaviors=[
+            BehaviorItem(label="전화 종료(빠른 판단)", evidence="끊을게요."),
+        ],
+        source="clawops",
+    )
+
+    final = _combine_reports(announced, unannounced)
+
+    assert final is not None
+    assert final.score == 44
+    assert [(b.label, b.evidence) for b in final.riskBehaviors] == [
+        ("개인정보 제공", "류상준입니다."),
+        ("통화 장시간 지속", "네, 네."),
+    ]
+    assert [b.label for b in final.defenseBehaviors] == ["전화 종료(빠른 판단)"]
+    assert len(unannounced.riskBehaviors) == 1
+
+
+def test_get_report_api_moves_from_none_to_final():
     client = _client()
     session_id, headers = _authenticated_session()
 
@@ -630,28 +524,28 @@ def test_get_report_api_none_then_draft(monkeypatch):
     assert missing.status_code == 404
 
     bind_call(session_id, "CAapi")
-    append_turn(session_id, "user", "누구세요")
+    assert client.get(f"/v1/sessions/{session_id}/report", headers=headers).json()[
+        "status"
+    ] == "pending"
 
-    async def fake_score(
-        transcript, *, source, clawops_summary=None, client=None, scenario=None
-    ):
-        return TrainingReport(
+    report_service._save_report(
+        session_id,
+        TrainingReport(
             suspected=True,
             gaveName=False,
             triedHangup=False,
             summary="의심했습니다.",
             coaching="공식 번호로 확인하세요.",
-            source=source,
-        )
-
-    monkeypatch.setattr(report_service, "score_conversation", fake_score)
-    asyncio.run(build_draft_report(session_id))
+            source="clawops",
+        ),
+        status="final",
+        call_id="CAapi",
+    )
     body = client.get(f"/v1/sessions/{session_id}/report", headers=headers).json()
-    assert body["status"] == "draft"
+    assert body["status"] == "final"
     assert body["draft"]["suspected"] is True
     session = client.get(f"/v1/sessions/{session_id}", headers=headers).json()["session"]
     assert session["callId"] == "CAapi"
-    assert session["reportStatus"] == "draft"
 
 
 def test_transcript_webhook_builds_final(monkeypatch):
@@ -705,36 +599,15 @@ def test_transcript_webhook_builds_final(monkeypatch):
     assert body["draft"]["source"] == "clawops"
 
 
-def test_register_transcript_listener_stores_turns():
-    session_id = _session_id()
-
-    class FakeAgent:
-        def __init__(self):
-            self.handlers = []
-
-        def on(self, event):
-            assert event == "transcript"
-
-            def decorator(fn):
-                self.handlers.append(fn)
-                return fn
-
-            return decorator
-
-    agent = FakeAgent()
-    register_transcript_listener(agent, session_id)
-    call = SimpleNamespace(call_id="CAlive")
-    asyncio.run(agent.handlers[0](call, "user", "  김민수입니다  "))
-    stored = get_report(session_id)
-    assert stored.callId == "CAlive"
-    assert stored.turns[0].text == "김민수입니다"
-    assert stored.turns[0].role == "user"
-
-
 def test_reset_sessions_clears_reports():
     session_id = _session_id()
     bind_call(session_id, "CAclear")
-    append_turn(session_id, "user", "hello")
+    report_service._save_report(
+        session_id,
+        heuristic_report("[훈련자] hello"),
+        status="final",
+        call_id="CAclear",
+    )
     reset_sessions()
     assert get_report(session_id).status == "none"
     assert get_report(session_id).turns == []

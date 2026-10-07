@@ -5,10 +5,11 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 
 from app.database import SessionLocal
 from app.models.call import Call
@@ -16,13 +17,11 @@ from app.models.scheduled_training import ScheduledTraining
 from app.models.training_report import TrainingReportRecord
 from app.models.transcript_turn import TranscriptTurnRecord
 from app.models.web_training import WebTrainingEvent
-
 from app.schemas.report import (
     BehaviorItem,
     GetReportResponse,
     TrainingReport,
     TranscriptTurn,
-    WebTrainingReport,
 )
 from app.services.session_service import set_session_call_id, update_report_status
 from app.training.scenarios import ensure_ai_importable, get_call_scenario
@@ -30,7 +29,6 @@ from app.training.scenarios import ensure_ai_importable, get_call_scenario
 
 logger = logging.getLogger(__name__)
 
-Role = Literal["user", "assistant"]
 ReportStatus = Literal["none", "pending", "draft", "final", "failed"]
 
 BASE_RESPONSE_SCORE = 60
@@ -52,11 +50,9 @@ DEFENSE_SCORE_WEIGHTS = {
     "신고 의사 표현": 12,
 }
 
-# 웹 훈련 이벤트를 전화 훈련과 같은 행동 라벨로 환산한다. 전화에서는 "의사"만
-# 확인되지만 웹에서는 실제 행동이 남으므로, 같은 라벨·같은 가중치를 그대로 쓰되
-# 증거 문구만 웹 맥락으로 표기한다. 매핑이 없는 이벤트(link_opened 등 중립 행동)는
-# 점수에 반영하지 않는다.
+# 웹 훈련(문자 링크) 행동을 전화와 같은 라벨·가중치로 환산한다.
 WEB_EVENT_LABELS: dict[str, str] = {
+    "link_opened": "링크 접근 의사",
     "identity_submitted": "개인정보 제공",
     "case_lookup_submitted": "개인정보 제공",
     "financial_info_submitted": "금융정보 제공",
@@ -65,6 +61,7 @@ WEB_EVENT_LABELS: dict[str, str] = {
     "left_without_input": "전화 종료(빠른 판단)",
 }
 WEB_EVENT_EVIDENCE: dict[str, str] = {
+    "link_opened": "웹 훈련: 문자 링크 열람",
     "identity_submitted": "웹 훈련: 본인인증 정보 제출",
     "case_lookup_submitted": "웹 훈련: 성명으로 사건 조회 시도",
     "financial_info_submitted": "웹 훈련: 금융정보 입력 제출",
@@ -73,24 +70,22 @@ WEB_EVENT_EVIDENCE: dict[str, str] = {
     "left_without_input": "웹 훈련: 정보 입력 없이 이탈",
 }
 
-def _trainee_tried_hangup(trainee_text: str) -> bool:
-    """Shared with the live pipeline so the caller's behaviour and the score
-    agree on what "the trainee tried to end the call" means.
+# 불시 전화 예약이 결과 없이 끝난 상태
+_ABANDONED_JOB_STATUSES = ("failed", "cancelled")
 
-    Asked one utterance at a time rather than over the whole blob: the rule
-    is about where in an utterance a closing lands, and joining every turn
-    into one string would put each of them in the middle of it.
-    """
-    ensure_ai_importable()
-    from ai.hangup import wants_hang_up
-
-    return any(wants_hang_up(line) for line in (trainee_text or "").splitlines())
 _SUSPECT = re.compile(
     r"(의심|누구세요|어디(?:세요|죠)|금감원|검찰|경찰|사기|피싱|대표번호|확인(해|할)|가짜)"
 )
 _NAME_OFFER = re.compile(
     r"(제\s*이름|성함|이름은|저는\s*[가-힣]{2,4}|[가-힣]{2,4}\s*(입니다|인데요|이라고))"
 )
+
+
+@dataclass(frozen=True)
+class WebScore:
+    score: int
+    riskBehaviors: list[BehaviorItem]
+    defenseBehaviors: list[BehaviorItem]
 
 
 class _LlmReport(BaseModel):
@@ -117,97 +112,26 @@ def session_id_for_call(call_id: str) -> str | None:
         return db.scalar(select(Call.session_id).where(Call.clawops_call_id == call_id))
 
 
-def _scenario_for_call(call_id: str):
-    """The scenario this call actually ran, for scoring and coaching.
-
-    Calls placed before scenario_id was recorded have none; get_call_scenario()
-    then picks the default, which is what the whole report used to be scored
-    against no matter which scam the trainee actually heard.
-    """
-    with SessionLocal() as db:
-        scenario_id = db.scalar(
-            select(Call.scenario_id).where(Call.clawops_call_id == call_id)
-        )
-    ensure_ai_importable()
-    if not scenario_id:
-        return get_call_scenario()
-    from ai.scenarios import get_scenario
-
-    return get_scenario(scenario_id)
-
-
 def bind_call(session_id: str, call_id: str) -> None:
     set_session_call_id(session_id, call_id)
     update_report_status(session_id, "pending")
 
 
-def append_turn(
-    session_id: str,
-    role: Role,
-    text: str,
-    *,
-    call_id: str | None = None,
-) -> None:
-    cleaned = (text or "").strip()
-    if role not in {"user", "assistant"} or not cleaned:
-        return
-    if call_id:
-        set_session_call_id(session_id, call_id)
-    with SessionLocal.begin() as db:
-        call = _get_call(db, call_id) if call_id else _latest_call(db, session_id)
-        sequence = db.scalar(
-            select(func.coalesce(func.max(TranscriptTurnRecord.sequence), 0)).where(
-                TranscriptTurnRecord.session_id == session_id,
-                TranscriptTurnRecord.source == "live",
-            )
-        )
-        db.add(
-            TranscriptTurnRecord(
-                session_id=session_id,
-                call_id=call.id if call is not None else None,
-                role=role,
-                text=cleaned,
-                source="live",
-                sequence=int(sequence or 0) + 1,
-            )
-        )
-    update_report_status(session_id, "pending")
-
-
-# Unannounced jobs that will never produce a result.
-_ABANDONED_JOB_STATUSES = ("failed", "cancelled")
-
-
 def get_report(session_id: str) -> GetReportResponse:
+    """한 회차의 리포트. 1차, 불시 전화, 둘을 합친 최종 리포트를 각각 채운다.
+
+    불시 전화는 별도 세션에서 진행되므로 예약(ScheduledTraining)으로 결과 세션을 찾아 붙인다.
+    문자 링크에서 한 행동은 그 문자를 보낸 통화의 리포트에 합친다.
+    """
     with SessionLocal() as db:
         call = _latest_call(db, session_id)
-        reports = db.scalars(
-            select(TrainingReportRecord).where(
-                TrainingReportRecord.session_id == session_id
-            )
-        ).all()
-        live_row = next((row for row in reports if row.source == "live"), None)
-        clawops_row = next((row for row in reports if row.source == "clawops"), None)
-        # The announced call's own result: the recording-based report when there
-        # is one, else the live draft. Managed calls never write a live report, so
-        # reading only "live" here hid the whole first call.
-        announced_row = clawops_row or live_row
-        announced_turn_rows = _turn_rows(
-            db, session_id, "clawops" if clawops_row is not None else "live"
-        ) or _turn_rows(db, session_id, "live")
+        announced_row = _clawops_report_row(db, session_id)
+        announced_turn_rows = _turn_rows(db, session_id)
         turns = announced_turn_rows
         unannounced_row = None
         unannounced_turn_rows: list[TranscriptTurnRecord] = []
-        # Each round shows three reports: the first call, the unannounced call,
-        # and the comparison of the two. The comparison only exists when both
-        # calls produced a report; a missing one is shown as "not created".
-        final_report: TrainingReport | None = None
+        unannounced_report: TrainingReport | None = None
 
-        # The unannounced call runs in its own session so retries and call records
-        # stay independent. For the user-facing report, however, it is the final
-        # result of the original announced-training session.
-        # A job that gave up (failed/cancelled) has no unannounced result to wait
-        # for, so the round ends with the announced call alone.
         scheduled = db.scalar(
             select(ScheduledTraining).where(
                 ScheduledTraining.source_session_id == session_id,
@@ -215,91 +139,106 @@ def get_report(session_id: str) -> GetReportResponse:
             )
         )
         if scheduled is None:
-            # A live draft alone still waits for the recording-based report.
-            round_done = clawops_row is not None
+            round_done = announced_row is not None
         else:
             if scheduled.result_session_id:
-                result_reports = db.scalars(
-                    select(TrainingReportRecord).where(
-                        TrainingReportRecord.session_id
-                        == scheduled.result_session_id
-                    )
-                ).all()
-                unannounced_row = next(
-                    (row for row in result_reports if row.source == "clawops"),
-                    None,
-                ) or next(
-                    (row for row in result_reports if row.source == "live"),
-                    None,
-                )
+                unannounced_row = _clawops_report_row(db, scheduled.result_session_id)
                 if unannounced_row is not None:
-                    result_call = _latest_call(db, scheduled.result_session_id)
-                    unannounced_turn_rows = _turn_rows(
-                        db, scheduled.result_session_id, unannounced_row.source
-                    )
-                    call = result_call or call
+                    unannounced_turn_rows = _turn_rows(db, scheduled.result_session_id)
+                    call = _latest_call(db, scheduled.result_session_id) or call
                     turns = unannounced_turn_rows
-                    final_report = _combine_reports(
-                        _report_schema(announced_row),
+                    unannounced_report = _with_web_behaviors(
                         _report_schema(unannounced_row),
+                        _web_event_types(db, scheduled.result_session_id),
                     )
             round_done = unannounced_row is not None or scheduled.status == "completed"
-        web_event_types = db.scalars(
-            select(WebTrainingEvent.event_type)
-            .where(WebTrainingEvent.session_id == session_id)
-            .order_by(WebTrainingEvent.created_at)
-        ).all()
-        web_training = (
-            score_web_events(list(web_event_types)) if web_event_types else None
-        )
 
-        status: ReportStatus = (
-            "final"
-            if round_done
-            else "draft"
-            if announced_row is not None
-            else "pending"
-            if call is not None or turns
-            else "none"
-        )
+        web_event_types = _web_event_types(db, session_id)
+        announced_report = _with_web_behaviors(_report_schema(announced_row), web_event_types)
+        summary_row = unannounced_row or announced_row
+
+        if round_done:
+            status: ReportStatus = "final"
+        elif announced_row is not None:
+            status = "draft"
+        elif call is not None or turns:
+            status = "pending"
+        else:
+            status = "none"
+
         return GetReportResponse(
             sessionId=session_id,
             callId=call.clawops_call_id if call is not None else None,
             status=status,
-            turns=[TranscriptTurn(role=row.role, text=row.text) for row in turns],
+            turns=_turn_schemas(turns),
             draftTurns=_turn_schemas(announced_turn_rows),
             unannouncedTurns=_turn_schemas(unannounced_turn_rows),
-            draft=_report_schema(announced_row),
-            unannounced=_report_schema(unannounced_row),
-            final=final_report,
-            clawopsSummary=(unannounced_row or announced_row).clawops_summary
-            if (unannounced_row or announced_row) is not None
-            else None,
-            webTraining=web_training,
+            draft=announced_report,
+            unannounced=unannounced_report,
+            final=_combine_reports(announced_report, unannounced_report),
+            clawopsSummary=summary_row.clawops_summary if summary_row is not None else None,
         )
 
 
-def _turn_rows(db, session_id: str, source: str) -> list[TranscriptTurnRecord]:
+def _clawops_report_row(db, session_id: str) -> TrainingReportRecord | None:
+    return db.scalar(
+        select(TrainingReportRecord).where(
+            TrainingReportRecord.session_id == session_id,
+            TrainingReportRecord.source == "clawops",
+        )
+    )
+
+
+def _turn_rows(db, session_id: str) -> list[TranscriptTurnRecord]:
     return list(
         db.scalars(
             select(TranscriptTurnRecord)
             .where(
                 TranscriptTurnRecord.session_id == session_id,
-                TranscriptTurnRecord.source == source,
+                TranscriptTurnRecord.source == "clawops",
             )
             .order_by(TranscriptTurnRecord.sequence)
         ).all()
     )
 
 
-def format_live_turns(turns: list[TranscriptTurn]) -> str:
-    lines: list[str] = []
-    for turn in turns:
-        speaker = "훈련자" if turn.role == "user" else "상대"
-        text = turn.text.strip()
-        if text:
-            lines.append(f"[{speaker}] {text}")
-    return "\n".join(lines)
+def _web_event_types(db, session_id: str) -> list[str]:
+    return list(
+        db.scalars(
+            select(WebTrainingEvent.event_type)
+            .where(WebTrainingEvent.session_id == session_id)
+            .order_by(WebTrainingEvent.created_at)
+        ).all()
+    )
+
+
+def _with_web_behaviors(
+    report: TrainingReport | None, event_types: list[str]
+) -> TrainingReport | None:
+    """문자 링크 행동을 통화 리포트에 더한다.
+
+    통화에서 이미 잡힌 라벨은 다시 세지 않는다. 목록 전체를 재채점하지 않고 저장된 점수에
+    가중치만 더해, 간이 채점(heuristic_report)으로 만든 리포트의 점수도 유지한다.
+    """
+    if report is None or not event_types:
+        return report
+    web = score_web_events(event_types)
+    risk_seen = {item.label for item in report.riskBehaviors}
+    defense_seen = {item.label for item in report.defenseBehaviors}
+    new_risk = [item for item in web.riskBehaviors if item.label not in risk_seen]
+    new_defense = [item for item in web.defenseBehaviors if item.label not in defense_seen]
+    if not new_risk and not new_defense:
+        return report
+    delta = sum(RISK_SCORE_WEIGHTS.get(item.label, 0) for item in new_risk) + sum(
+        DEFENSE_SCORE_WEIGHTS.get(item.label, 0) for item in new_defense
+    )
+    return report.model_copy(
+        update={
+            "score": _clamp_score(report.score + delta),
+            "riskBehaviors": [*report.riskBehaviors, *new_risk],
+            "defenseBehaviors": [*report.defenseBehaviors, *new_defense],
+        }
+    )
 
 
 def format_clawops_segments(segments: Any, agent_speaker: str | None = None) -> str:
@@ -314,10 +253,7 @@ def format_clawops_segments(segments: Any, agent_speaker: str | None = None) -> 
 
 
 def _is_trainee(segment: Any, agent_speaker: str | None) -> bool:
-    """Transcripts since 2026-08 label speakers speaker_0/1/... with no fixed
-    mapping to roles, so the AI's speaker is worked out from what it said
-    (agent_speaker_for). Without one, fall back to the old AGENT/CUSTOMER
-    labels."""
+    """녹취록 화자는 speaker_0/1처럼 역할과 무관하게 붙는다. AI 화자를 찾지 못하면 옛 CUSTOMER 라벨로 판단한다."""
     speaker = _attr(segment, "speaker")
     if agent_speaker is None:
         return speaker == "CUSTOMER"
@@ -332,9 +268,7 @@ def agent_speaker_for(segments: Any, scenario: Any) -> str | None:
 
 
 def _audit_agent_speech(call_id: str, segments: Any, agent_speaker: str | None) -> None:
-    """Managed agents speak straight from ClawOps, so nothing can block a bad
-    line mid-call. Check the transcript afterwards and log every slip so the
-    shared instructions can be fixed."""
+    """매니지드 에이전트의 발화는 통화 중에 막을 수 없어, 통화 뒤 녹취록으로 안전 규칙 위반을 기록한다."""
     if agent_speaker is None:
         return
     ensure_ai_importable()
@@ -347,116 +281,80 @@ def _audit_agent_speech(call_id: str, segments: Any, agent_speaker: str | None) 
     ]
     for finding in audit_transcript(agent_texts):
         logger.warning(
-            "Safety audit call_id=%s kind=%s text=%s",
-            call_id,
-            finding["kind"],
-            finding["text"],
+            "Safety audit call_id=%s kind=%s text=%s", call_id, finding["kind"], finding["text"]
         )
 
 
-def heuristic_report(transcript: str, *, source: Literal["live", "clawops"]) -> TrainingReport:
+def heuristic_report(transcript: str) -> TrainingReport:
+    """LLM을 쓸 수 없거나 훈련자 발화가 없을 때 쓰는 키워드 기반 간이 채점."""
     blob = _trainee_text(transcript)
-    empty = not blob.strip()
     suspected = bool(_SUSPECT.search(blob))
     gave_name = bool(_NAME_OFFER.search(blob))
     tried_hangup = _trainee_tried_hangup(blob)
-    fallback_score = max(
-        0,
-        min(
-            100,
-            BASE_RESPONSE_SCORE
-            + (8 if suspected else 0)
-            - (15 if gave_name else 0)
-            + (15 if tried_hangup else 0),
-        ),
+    score = (
+        BASE_RESPONSE_SCORE
+        + (8 if suspected else 0)
+        - (15 if gave_name else 0)
+        + (15 if tried_hangup else 0)
     )
     return TrainingReport(
-        score=fallback_score,
+        score=_clamp_score(score),
         suspected=suspected,
         gaveName=gave_name,
         triedHangup=tried_hangup,
         summary=(
-            "통화 내용이 거의 없어 바로 평가하기 어렵습니다."
-            if empty
-            else "실시간 받아쓰기를 바탕으로 한 빠른 회고입니다. 최종 전사가 오면 다시 정리합니다."
+            "녹취록을 바탕으로 한 간단한 평가입니다."
+            if blob.strip()
+            else "통화 내용이 거의 없어 바로 평가하기 어렵습니다."
         ),
-        coaching=(
-            "상대가 누구인지 확인하고, 성함 같은 개인정보를 대지 말고, "
-            "의심되면 바로 끊으세요."
-        ),
-        source=source,
+        coaching="상대가 누구인지 확인하고, 성함 같은 개인정보를 대지 말고, 의심되면 바로 끊으세요.",
+        source="clawops",
     )
+
+
+def _trainee_tried_hangup(trainee_text: str) -> bool:
+    ensure_ai_importable()
+    from ai.hangup import wants_hang_up
+
+    # 끊기 판단은 발화 안의 위치를 보므로 한 줄씩 묻는다.
+    return any(wants_hang_up(line) for line in (trainee_text or "").splitlines())
 
 
 async def score_conversation(
     transcript: str,
     *,
-    source: Literal["live", "clawops"],
     clawops_summary: dict[str, Any] | None = None,
     client: Any | None = None,
     scenario: Any | None = None,
 ) -> TrainingReport:
+    """LLM으로 행동을 뽑고, 훈련자가 실제로 한 말로 근거가 확인된 것만 점수에 반영한다."""
     trainee_text = _trainee_text(transcript)
     if not trainee_text:
-        return heuristic_report(transcript, source=source)
+        return heuristic_report(transcript)
 
     try:
         parsed = await _ask_report_llm(
-            transcript,
-            source=source,
-            clawops_summary=clawops_summary,
-            client=client,
-            scenario=scenario,
+            transcript, clawops_summary=clawops_summary, client=client, scenario=scenario
         )
     except Exception:
         logger.exception("Training report LLM failed; using heuristic")
-        return heuristic_report(transcript, source=source)
+        return heuristic_report(transcript)
 
     risk_labels, defense_labels = _behavior_labels()
-    risk_behaviors = _keep_supported(
-        parsed.riskBehaviors,
-        risk_labels,
-        trainee_text,
-    )
-    defense_behaviors = _keep_supported(
-        parsed.defenseBehaviors,
-        defense_labels,
-        trainee_text,
-    )
-    suspected = _grounded_flag(parsed.suspected, parsed.suspectedEvidence, trainee_text)
-    gave_name = _grounded_flag(parsed.gaveName, parsed.gaveNameEvidence, trainee_text)
-    tried_hangup = _grounded_flag(parsed.triedHangup, parsed.triedHangupEvidence, trainee_text)
+    risk_behaviors = _keep_supported(parsed.riskBehaviors, risk_labels, trainee_text)
+    defense_behaviors = _keep_supported(parsed.defenseBehaviors, defense_labels, trainee_text)
+    fallback = heuristic_report(transcript)
     return TrainingReport(
         score=calculate_response_score(risk_behaviors, defense_behaviors),
-        suspected=suspected,
-        gaveName=gave_name,
-        triedHangup=tried_hangup,
-        summary=parsed.summary.strip() or heuristic_report(transcript, source=source).summary,
-        coaching=parsed.coaching.strip()
-        or heuristic_report(transcript, source=source).coaching,
+        suspected=_grounded_flag(parsed.suspected, parsed.suspectedEvidence, trainee_text),
+        gaveName=_grounded_flag(parsed.gaveName, parsed.gaveNameEvidence, trainee_text),
+        triedHangup=_grounded_flag(parsed.triedHangup, parsed.triedHangupEvidence, trainee_text),
+        summary=parsed.summary.strip() or fallback.summary,
+        coaching=parsed.coaching.strip() or fallback.coaching,
         riskBehaviors=risk_behaviors,
         defenseBehaviors=defense_behaviors,
-        source=source,
+        source="clawops",
     )
-
-
-async def build_draft_report(
-    session_id: str,
-    *,
-    client: Any | None = None,
-    scenario: Any | None = None,
-) -> TrainingReport:
-    turns = get_report(session_id).turns
-    transcript = format_live_turns(turns)
-    report = await score_conversation(
-        transcript, source="live", client=client, scenario=scenario
-    )
-    _save_report(session_id, report, status="draft")
-    status: ReportStatus = "final" if get_report(session_id).status == "final" else "draft"
-    update_report_status(session_id, status)
-    _mark_source_report_ready(session_id)
-    logger.info("Draft report ready session=%s turns=%s", session_id, len(turns))
-    return report
 
 
 async def request_clawops_transcript(call_id: str) -> None:
@@ -470,13 +368,9 @@ async def request_clawops_transcript(call_id: str) -> None:
         logger.info("Requested ClawOps transcript call_id=%s", call_id)
     except Exception as exc:
         name = type(exc).__name__
+        # 이미 요청됐거나 요청할 수 없는 통화는 정상 흐름으로 본다.
         if name in {"ConflictError", "BadRequestError"}:
-            logger.info(
-                "ClawOps transcript not requested (%s): call_id=%s %s",
-                name,
-                call_id,
-                exc,
-            )
+            logger.info("ClawOps transcript not requested (%s): call_id=%s %s", name, call_id, exc)
             return
         logger.exception("ClawOps transcript request failed: call_id=%s", call_id)
 
@@ -507,9 +401,10 @@ async def build_final_report(
     *,
     client: Any | None = None,
 ) -> TrainingReport | None:
+    """녹취록이 준비되면 화자를 나누고 채점해 통화 리포트를 저장한다."""
     transcript_status = await asyncio.to_thread(fetch_clawops_transcript, call_id)
-    segments = getattr(transcript_status, "segments", None) if transcript_status else None
-    status_name = getattr(transcript_status, "status", None) if transcript_status else None
+    segments = getattr(transcript_status, "segments", None)
+    status_name = getattr(transcript_status, "status", None)
     if status_name != "completed" or not segments:
         logger.warning(
             "ClawOps transcript not ready session=%s call_id=%s status=%s",
@@ -522,39 +417,38 @@ async def build_final_report(
     scenario = _scenario_for_call(call_id)
     agent_speaker = agent_speaker_for(segments, scenario)
     if agent_speaker is None:
-        logger.warning(
-            "Could not tell the AI speaker apart call_id=%s; using CUSTOMER labels",
-            call_id,
-        )
+        logger.warning("Could not tell the AI speaker apart call_id=%s; using CUSTOMER labels", call_id)
     _audit_agent_speech(call_id, segments, agent_speaker)
-    transcript = format_clawops_segments(segments, agent_speaker)
     summary = await asyncio.to_thread(fetch_clawops_summary, call_id)
     report = await score_conversation(
-        transcript,
-        source="clawops",
+        format_clawops_segments(segments, agent_speaker),
         clawops_summary=summary,
         client=client,
         scenario=scenario,
     )
     _replace_clawops_turns(session_id, call_id, segments, agent_speaker)
-    _save_report(
-        session_id,
-        report,
-        status="final",
-        call_id=call_id,
-        clawops_summary=summary,
-    )
+    _save_report(session_id, report, status="final", call_id=call_id, clawops_summary=summary)
     update_report_status(
-        session_id,
-        "draft" if _has_scheduled_unannounced_training(session_id) else "final",
+        session_id, "draft" if _has_scheduled_unannounced_training(session_id) else "final"
     )
     _mark_source_report_ready(session_id)
     logger.info("Final report ready session=%s call_id=%s", session_id, call_id)
     return report
 
 
+def _scenario_for_call(call_id: str):
+    with SessionLocal() as db:
+        scenario_id = db.scalar(select(Call.scenario_id).where(Call.clawops_call_id == call_id))
+    ensure_ai_importable()
+    if not scenario_id:
+        return get_call_scenario()
+    from ai.scenarios import get_scenario
+
+    return get_scenario(scenario_id)
+
+
 def _mark_source_report_ready(result_session_id: str) -> None:
-    """Expose a completed unannounced-session report on its source session."""
+    """불시 전화 리포트가 나오면 원래 1차 세션의 리포트를 최종으로 바꾼다."""
     with SessionLocal() as db:
         source_session_id = db.scalar(
             select(ScheduledTraining.source_session_id).where(
@@ -572,12 +466,15 @@ def _mark_source_report_ready(result_session_id: str) -> None:
 
 def _has_scheduled_unannounced_training(session_id: str) -> bool:
     with SessionLocal() as db:
-        return db.scalar(
-            select(ScheduledTraining.id).where(
-                ScheduledTraining.source_session_id == session_id,
-                ScheduledTraining.status.not_in(_ABANDONED_JOB_STATUSES),
+        return (
+            db.scalar(
+                select(ScheduledTraining.id).where(
+                    ScheduledTraining.source_session_id == session_id,
+                    ScheduledTraining.status.not_in(_ABANDONED_JOB_STATUSES),
+                )
             )
-        ) is not None
+            is not None
+        )
 
 
 def fetch_clawops_transcript(call_id: str) -> Any:
@@ -594,21 +491,6 @@ def fetch_clawops_summary(call_id: str) -> dict[str, Any] | None:
         return None
     result = getattr(status, "result_json", None)
     return dict(result) if isinstance(result, dict) else None
-
-
-def register_transcript_listener(agent: Any, session_id: str) -> None:
-    async def on_transcript(call: Any, role: str, text: str) -> None:
-        try:
-            append_turn(
-                session_id,
-                role,  # type: ignore[arg-type]
-                text,
-                call_id=getattr(call, "call_id", None),
-            )
-        except Exception:
-            logger.exception("Failed to store live turn session=%s", session_id)
-
-    agent.on("transcript")(on_transcript)
 
 
 def _latest_call(db: Any, session_id: str) -> Call | None:
@@ -637,9 +519,7 @@ def _report_schema(row: TrainingReportRecord | None) -> TrainingReport | None:
         summary=row.summary,
         coaching=row.coaching,
         riskBehaviors=[BehaviorItem.model_validate(item) for item in row.risk_behaviors],
-        defenseBehaviors=[
-            BehaviorItem.model_validate(item) for item in row.defense_behaviors
-        ],
+        defenseBehaviors=[BehaviorItem.model_validate(item) for item in row.defense_behaviors],
         source=row.source,
     )
 
@@ -649,7 +529,7 @@ def _turn_schemas(rows: list[TranscriptTurnRecord]) -> list[TranscriptTurn]:
 
 
 def _josa(word: str, with_batchim: str, without_batchim: str) -> str:
-    """Pick the Korean particle matching `word`'s trailing syllable's 받침."""
+    """단어의 마지막 글자 받침에 맞는 조사를 고른다."""
     for char in reversed(word):
         code = ord(char) - 0xAC00
         if 0 <= code <= 11171:
@@ -661,6 +541,7 @@ def _combine_reports(
     announced: TrainingReport | None,
     unannounced: TrainingReport | None,
 ) -> TrainingReport | None:
+    """1차와 불시 전화 리포트를 합친 최종 리포트. 점수는 평균, 행동 목록은 두 통화를 모두 담는다."""
     if announced is None or unannounced is None:
         return None
 
@@ -706,9 +587,7 @@ def _combine_reports(
             f"1차에서 보였던 {', '.join(lost_defense)} 방어 행동은 불시 전화에서 나타나지 않았습니다."
         )
     if new_defense:
-        summary_parts.append(
-            f"불시 전화에서 {', '.join(new_defense)} 방어 행동이 새로 나타났습니다."
-        )
+        summary_parts.append(f"불시 전화에서 {', '.join(new_defense)} 방어 행동이 새로 나타났습니다.")
 
     if repeated_risk:
         joined = ", ".join(repeated_risk)
@@ -725,10 +604,22 @@ def _combine_reports(
         triedHangup=announced.triedHangup and unannounced.triedHangup,
         summary=" ".join(summary_parts),
         coaching=coaching,
-        riskBehaviors=unannounced.riskBehaviors,
-        defenseBehaviors=unannounced.defenseBehaviors,
+        riskBehaviors=_merge_behaviors(announced.riskBehaviors, unannounced.riskBehaviors),
+        defenseBehaviors=_merge_behaviors(announced.defenseBehaviors, unannounced.defenseBehaviors),
         source="comparison",
     )
+
+
+def _merge_behaviors(first: list[BehaviorItem], second: list[BehaviorItem]) -> list[BehaviorItem]:
+    """통화 순서대로 합치고, 라벨과 근거가 모두 같은 항목은 한 번만 넣는다."""
+    merged: list[BehaviorItem] = []
+    seen: set[tuple[str, str]] = set()
+    for item in [*first, *second]:
+        key = (item.label, item.evidence)
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return merged
 
 
 def _save_report(
@@ -757,19 +648,11 @@ def _save_report(
             "summary": report.summary,
             "coaching": report.coaching,
             "risk_behaviors": [item.model_dump() for item in report.riskBehaviors],
-            "defense_behaviors": [
-                item.model_dump() for item in report.defenseBehaviors
-            ],
+            "defense_behaviors": [item.model_dump() for item in report.defenseBehaviors],
             "clawops_summary": clawops_summary,
         }
         if row is None:
-            db.add(
-                TrainingReportRecord(
-                    session_id=session_id,
-                    source=report.source,
-                    **values,
-                )
-            )
+            db.add(TrainingReportRecord(session_id=session_id, source=report.source, **values))
         else:
             for key, value in values.items():
                 setattr(row, key, value)
@@ -808,6 +691,7 @@ def _replace_clawops_turns(
 
 
 def _attr(obj: Any, name: str) -> Any:
+    """SDK 객체와 dict(snake_case·camelCase) 응답을 같은 방식으로 읽는다."""
     if isinstance(obj, dict):
         return obj.get(name) or obj.get(_to_camel(name))
     return getattr(obj, name, None)
@@ -818,46 +702,33 @@ def _to_camel(name: str) -> str:
     return head + "".join(part.title() for part in rest)
 
 
-def _keep_known(items: list[BehaviorItem], allowed: tuple[str, ...]) -> list[BehaviorItem]:
-    return [item for item in items if item.label in allowed and item.evidence.strip()]
-
-
 def _keep_supported(
     items: list[BehaviorItem],
     allowed: tuple[str, ...],
     trainee_text: str,
 ) -> list[BehaviorItem]:
+    """허용된 라벨이면서 근거 문장이 훈련자 발화에 실제로 있는 항목만 남긴다."""
     normalized_trainee = _normalize_evidence(trainee_text)
-    supported: list[BehaviorItem] = []
-    for item in _keep_known(items, allowed):
-        evidence = _normalize_evidence(item.evidence)
-        if evidence and evidence in normalized_trainee:
-            supported.append(item)
-    return supported
+    return [
+        item
+        for item in items
+        if item.label in allowed
+        and (evidence := _normalize_evidence(item.evidence))
+        and evidence in normalized_trainee
+    ]
 
 
 def _grounded_flag(flag: bool, evidence: str, trainee_text: str) -> bool:
-    """Downgrade an ungrounded suspected/gaveName/triedHangup claim to False.
-
-    riskBehaviors/defenseBehaviors were already dropped unless their evidence
-    is actually found in what the trainee said (_keep_supported below) -- these
-    three summary booleans had no such check and were trusted straight off the
-    LLM's JSON. Hold them to the same bar.
-    """
+    """의심·이름·끊기 여부도 근거가 훈련자 발화에 있을 때만 True로 인정한다."""
     if not flag:
         return False
     normalized_evidence = _normalize_evidence(evidence)
-    if not normalized_evidence:
-        return False
-    return normalized_evidence in _normalize_evidence(trainee_text)
+    return bool(normalized_evidence) and normalized_evidence in _normalize_evidence(trainee_text)
 
 
 def _trainee_text(transcript: str) -> str:
     lines = (transcript or "").splitlines()
-    has_speaker_labels = any(
-        line.startswith("[훈련자]") or line.startswith("[상대]") for line in lines
-    )
-    if not has_speaker_labels:
+    if not any(line.startswith(("[훈련자]", "[상대]")) for line in lines):
         return (transcript or "").strip()
     return "\n".join(
         line.split("]", 1)[-1].strip()
@@ -870,25 +741,25 @@ def _normalize_evidence(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z가-힣]", "", text or "").lower()
 
 
+def _clamp_score(score: int) -> int:
+    return max(0, min(100, score))
+
+
 def calculate_response_score(
     risk_behaviors: list[BehaviorItem],
     defense_behaviors: list[BehaviorItem],
 ) -> int:
-    score = BASE_RESPONSE_SCORE
+    """기본 60점에서 위험 행동은 빼고 방어 행동은 더한다. 같은 라벨은 한 번만 센다."""
     risk_labels = {item.label for item in risk_behaviors}
     defense_labels = {item.label for item in defense_behaviors}
+    score = BASE_RESPONSE_SCORE
     score += sum(RISK_SCORE_WEIGHTS.get(label, 0) for label in risk_labels)
-    score += sum(
-        DEFENSE_SCORE_WEIGHTS.get(label, 0) for label in defense_labels
-    )
-    return max(0, min(100, score))
+    score += sum(DEFENSE_SCORE_WEIGHTS.get(label, 0) for label in defense_labels)
+    return _clamp_score(score)
 
 
-def score_web_events(event_types: list[str]) -> WebTrainingReport:
-    """웹 훈련 이벤트 목록을 전화와 같은 척도로 채점한다.
-
-    같은 이벤트가 중복으로 들어와도 라벨은 집합으로 모으므로 한 번만 반영된다.
-    """
+def score_web_events(event_types: list[str]) -> WebScore:
+    """웹 훈련 이벤트를 전화와 같은 척도로 채점한다. 같은 라벨은 한 번만 반영된다."""
     seen: dict[str, str] = {}
     for event in event_types:
         label = WEB_EVENT_LABELS.get(event)
@@ -905,9 +776,8 @@ def score_web_events(event_types: list[str]) -> WebTrainingReport:
         for label, evidence in seen.items()
         if label in DEFENSE_SCORE_WEIGHTS
     ]
-    return WebTrainingReport(
+    return WebScore(
         score=calculate_response_score(risk, defense),
-        events=list(dict.fromkeys(event_types)),
         riskBehaviors=risk,
         defenseBehaviors=defense,
     )
@@ -931,48 +801,40 @@ def _clawops_calls() -> Any:
 
 
 def _report_llm_attempts() -> list[tuple[str, Any, str]]:
-    """(label, client, model) attempts for the report LLM, in priority order.
+    """채점 LLM 후보(이름, 클라이언트, 모델). 키가 설정된 것만, OpenAI → Gemini 순서로 시도한다.
 
-    Both providers are reachable through the OpenAI-compatible chat.completions
-    shape (Gemini via its own compatible endpoint -- see
-    ai/llm_stream.py, which uses the same endpoint), so the same call works against either client. Only the ones
-    whose API key is actually configured are attempted; if neither is, the
-    caller gets a clear error instead of an opaque auth failure.
+    Gemini도 OpenAI 호환 엔드포인트로 같은 호출 형식을 쓴다.
     """
     from openai import AsyncOpenAI
 
     attempts: list[tuple[str, Any, str]] = []
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
     if openai_key:
-        attempts.append((
-            "OpenAI",
-            # max_retries=0: the SDK otherwise burns ~1.2s retrying a
-            # credit-exhausted 429 that will never succeed. Falling over to
-            # the other provider is both faster and more likely to work.
-            AsyncOpenAI(api_key=openai_key, max_retries=0),
-            os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
-        ))
+        attempts.append(
+            (
+                "OpenAI",
+                # 크레딧 소진 429는 재시도해도 실패하므로 바로 다음 제공자로 넘어간다.
+                AsyncOpenAI(api_key=openai_key, max_retries=0),
+                os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+            )
+        )
     gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
     if gemini_key:
         ensure_ai_importable()
         from ai.config import GEMINI_OPENAI_BASE_URL
 
-        attempts.append((
-            "Gemini",
-            AsyncOpenAI(
-                api_key=gemini_key,
-                base_url=GEMINI_OPENAI_BASE_URL,
-                max_retries=1,
-            ),
-            os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-            or "gemini-3.5-flash-lite",
-        ))
+        attempts.append(
+            (
+                "Gemini",
+                AsyncOpenAI(api_key=gemini_key, base_url=GEMINI_OPENAI_BASE_URL, max_retries=1),
+                os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+                or "gemini-3.5-flash-lite",
+            )
+        )
     return attempts
 
 
-async def _report_completion(
-    client: Any, model: str, system: str, user_content: str
-) -> str:
+async def _report_completion(client: Any, model: str, system: str, user_content: str) -> str:
     response = await client.chat.completions.create(
         model=model,
         temperature=0,
@@ -988,29 +850,21 @@ async def _report_completion(
 async def _ask_report_llm(
     transcript: str,
     *,
-    source: Literal["live", "clawops"],
     clawops_summary: dict[str, Any] | None,
     client: Any | None,
     scenario: Any | None,
 ) -> _LlmReport:
     risk_labels, defense_labels = _behavior_labels()
-    source_note = (
-        "실시간 STT라 오인식이 있을 수 있다. 확실한 것만 표시한다."
-        if source == "live"
-        else "녹음 기준 화자 분리 전사다. 이 전사를 우선한다."
-    )
     summary_note = ""
     if clawops_summary:
-        summary_note = (
-            "\n\nClawOps 일반 요약(초안, 교육 루브릭 아님):\n"
-            + json.dumps(clawops_summary, ensure_ascii=False)
+        summary_note = "\n\nClawOps 일반 요약(초안, 교육 루브릭 아님):\n" + json.dumps(
+            clawops_summary, ensure_ascii=False
         )
-    scenario_note = _scenario_report_note(scenario)
     system = f"""
 너는 보이스피싱 모의훈련 코치다. 이 대화는 사전 동의 하의 교육 시뮬레이션이다.
 실제 금감원·검찰·은행 전화가 아니다. 점수나 등급은 매기지 마라.
-{source_note}
-{scenario_note}
+녹음 기준 화자 분리 전사다. 이 전사를 우선한다.
+{_scenario_report_note(scenario)}
 
 반드시 JSON 객체만 반환한다.
 형식:
@@ -1037,12 +891,9 @@ async def _ask_report_llm(
 - evidence는 짧은 인용. 근거 없으면 그 라벨을 넣지 마라
 - 추측으로 채우지 마라
 """.strip()
-
     user_content = f"대화 기록:\n{transcript}{summary_note}"
 
     if client is not None:
-        # Caller supplied a client explicitly (tests, or a future caller that
-        # wants a specific provider) -- use exactly that, no fallback.
         raw = await _report_completion(
             client,
             os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
@@ -1050,29 +901,7 @@ async def _ask_report_llm(
             user_content,
         )
     else:
-        attempts = _report_llm_attempts()
-        if not attempts:
-            raise RuntimeError(
-                "Report LLM unavailable: neither OPENAI_API_KEY nor "
-                "GEMINI_API_KEY is set"
-            )
-        raw = None
-        last_error: Exception | None = None
-        for label, attempt_client, model in attempts:
-            try:
-                raw = await _report_completion(attempt_client, model, system, user_content)
-                break
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "Report LLM via %s failed; trying next provider: %s",
-                    label,
-                    exc,
-                )
-        if raw is None:
-            raise RuntimeError(
-                "Report LLM failed on every configured provider"
-            ) from last_error
+        raw = await _complete_with_fallback(system, user_content)
 
     try:
         return _LlmReport.model_validate(json.loads(raw))
@@ -1080,7 +909,22 @@ async def _ask_report_llm(
         raise RuntimeError(f"Report LLM returned invalid JSON: {raw[:500]}") from exc
 
 
+async def _complete_with_fallback(system: str, user_content: str) -> str:
+    attempts = _report_llm_attempts()
+    if not attempts:
+        raise RuntimeError("Report LLM unavailable: neither OPENAI_API_KEY nor GEMINI_API_KEY is set")
+    last_error: Exception | None = None
+    for label, attempt_client, model in attempts:
+        try:
+            return await _report_completion(attempt_client, model, system, user_content)
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Report LLM via %s failed; trying next provider: %s", label, exc)
+    raise RuntimeError("Report LLM failed on every configured provider") from last_error
+
+
 def _scenario_report_note(scenario: Any | None = None) -> str:
+    """시나리오의 수법·위험 신호·권장 대응을 채점 프롬프트에 붙인다."""
     try:
         scenario = scenario or get_call_scenario()
     except Exception:

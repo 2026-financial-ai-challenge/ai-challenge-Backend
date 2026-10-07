@@ -5,17 +5,14 @@ import re
 from clawops import ClawOps
 
 from app.errors import ApiError
+from app.services.session_service import mask_phone_number
 
 
 logger = logging.getLogger(__name__)
 
 
 def send_sms(phone_number: str, body: str) -> str:
-    """ClawOps로 문자 한 통을 보내고 message_id를 반환한다.
-
-    Lightsail(서울 리전)에서 직접 호출한다 — 국외 리전용 중계는 쓰지 않는다.
-    설정 누락은 500(SMS_NOT_CONFIGURED), 발송 실패는 502(SMS_SEND_FAILED)로 올린다.
-    """
+    """ClawOps로 문자를 보내고 message_id를 반환한다. ClawOps는 국내 IP에서만 발송을 허용한다."""
     api_key = os.getenv("CLAWOPS_API_KEY", "").strip()
     account_id = os.getenv("CLAWOPS_ACCOUNT_ID", "").strip()
     from_number = os.getenv("CLAWOPS_SMS_FROM", "").strip()
@@ -56,7 +53,7 @@ def send_sms(phone_number: str, body: str) -> str:
     logger.info(
         "ClawOps SMS queued: message_id=%s phone=%s",
         message.message_id,
-        _mask_phone(phone_number),
+        mask_phone_number(phone_number),
     )
     return message.message_id
 
@@ -71,6 +68,3 @@ def send_verification_code(phone_number: str, code: str) -> None:
 def expose_dev_code() -> bool:
     return os.getenv("SMS_EXPOSE_DEV_CODE", "false").lower() == "true"
 
-
-def _mask_phone(phone_number: str) -> str:
-    return f"{phone_number[:3]}-****-{phone_number[-4:]}"

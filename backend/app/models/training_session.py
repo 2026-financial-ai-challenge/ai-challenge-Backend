@@ -50,6 +50,3 @@ class TrainingSession(Base):
     reports: Mapped[list["TrainingReportRecord"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
-    web_links: Mapped[list["WebTrainingLink"]] = relationship(
-        back_populates="session", cascade="all, delete-orphan"
-    )

@@ -65,8 +65,8 @@ class Playbook:
     # Few-shot (trainee line, caller reply) pairs. These teach length and
     # register far more cheaply than another paragraph of instructions.
     examples: tuple[tuple[str, str], ...] = ()
-    # (trigger name from ai.scenarios.reflex, canned reply). Answered without
-    # an LLM call, so the reply must fit anywhere in the conversation.
+    # (ai.scenarios.reflex의 트리거 이름, 고정 답). 통화 지시문에는 들어가지 않고,
+    # 녹취에서 AI 화자를 가려낼 때(ai/transcript.py)만 쓴다.
     quick_replies: tuple[tuple[str, str], ...] = ()
     hangup_line: str = ""
     # 거절했을 때 한 번 하는 포기 경고. 인물마다 손해나 불이익으로 압박한다.
@@ -74,9 +74,9 @@ class Playbook:
     # 목표의 마지막 요구를 승낙받으면 하는 넘김 말. 이 말 뒤 상대가 한 번 더 말하면 통화를 끝낸다.
     handoff_line: str = ""
     tts_voice_id: str | None = None
-    # Pre-written lines for the script call mode. Unlike turn_plan these ARE
-    # spoken verbatim, so each one must read as a finished caller line: one
-    # or two short sentences that fit wherever that step or intent comes up.
+    # 대본 모드용으로 쓴 완성 대사. 매니지드 에이전트 통화에서는 progression 전체가
+    # [단계별 대사 예시]로, script는 의도별 첫 줄만 [상대 반응별 받아치기 예시]로
+    # 지시문에 들어간다(ai/managed_agent.py). 그대로 말해도 어색하지 않게 쓴다.
     progression: tuple[str, ...] = ()
     script: tuple[ScriptReply, ...] = ()
 
